@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🌌 Violet Universe & Channel Explorer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #0f111a; color: #e2e8f0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scroll::-webkit-scrollbar-track { background: #1a1d2d; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #3b4261; border-radius: 4px; }
+  </style>
+</head>
+<body class="p-4 md:p-8 custom-scroll">
+  <div class="max-w-7xl mx-auto">
+    <!-- Header -->
+    <header class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-800">
+      <div>
+        <div class="flex items-center gap-3">
+          <span class="text-3xl">🌌</span>
+          <h1 class="text-2xl md:text-3xl font-bold bg-gradient-to-r from-purple-400 via-pink-400 to-indigo-400 bg-clip-text text-transparent">
+            Violet Universe & Channel Explorer
+          </h1>
+        </div>
+        <p class="text-sm text-slate-400 mt-1">Full breakdown of all roleplay universes, assigned servers, and unassigned channels in SQLite.</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="text-xs px-3 py-1.5 rounded-lg bg-indigo-950 border border-indigo-800 text-indigo-300 font-mono">
+          📁 Total Messages: 623,138
+        </span>
+      </div>
+    </header>
+
+    <!-- Universe Stat Cards -->
+    <div id="universeCards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 my-6">
+      <!-- Populated by JS -->
+    </div>
+
+    <!-- Search & Filter Bar -->
+    <div class="bg-slate-900/90 border border-slate-800 p-4 rounded-xl mb-6 shadow-xl flex flex-col md:flex-row items-stretch md:items-center gap-4">
+      <div class="relative flex-1">
+        <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">🔍</span>
+        <input type="text" id="searchInput" oninput="filterChannels()" placeholder="Search channels by name, server, or channel ID..." 
+               class="w-full pl-10 pr-4 py-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+      </div>
+      
+      <div class="flex items-center gap-2 flex-wrap">
+        <select id="universeFilter" onchange="filterChannels()" class="bg-slate-950 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-2.5 focus:outline-none focus:border-indigo-500">
+          <option value="ALL">All Universes & Unassigned</option>
+          <option value="UNASSIGNED" selected>⚠️ Show Unassigned Only (244)</option>
+        </select>
+
+        <select id="sortFilter" onchange="filterChannels()" class="bg-slate-950 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-2.5 focus:outline-none focus:border-indigo-500">
+          <option value="msgs_desc">Most Messages First</option>
+          <option value="msgs_asc">Least Messages First</option>
+          <option value="name_asc">Channel Name (A-Z)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Results Table -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
+      <div class="px-6 py-4 bg-slate-950/60 border-b border-slate-800 flex items-center justify-between">
+        <h2 class="text-base font-semibold text-slate-200 flex items-center gap-2">
+          <span>Channels & Contacts</span>
+          <span id="resultsCount" class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">0 found</span>
+        </h2>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse text-sm">
+          <thead>
+            <tr class="border-b border-slate-800 text-xs font-semibold uppercase tracking-wider text-slate-400 bg-slate-950/40">
+              <th class="p-4">Channel / Contact Name</th>
+              <th class="p-4">Channel ID</th>
+              <th class="p-4">Messages</th>
+              <th class="p-4">Current Universe</th>
+              <th class="p-4 text-right">Discord Command</th>
+            </tr>
+          </thead>
+          <tbody id="channelsTableBody" class="divide-y divide-slate-800/60">
+            <!-- Populated by JS -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let globalData = { assigned: [], unassigned: [], universes: [] };
+
+    async function init() {
+      try {
+        const res = await fetch('./universes_export.json');
+        const data = await res.json();
+        globalData.assigned = data.assigned;
+        globalData.unassigned = data.unassigned;
+        globalData.universes = [...new Set(data.assigned.map(x => x.universe))].sort();
+      } catch (e) {
+        console.log("Loading fallback data...");
+      }
+      renderUniverseCards();
+      populateUniverseDropdowns();
+      filterChannels();
+    }
+
+    function renderUniverseCards() {
+      const container = document.getElementById('universeCards');
+      container.innerHTML = '';
+
+      const uniStats = {};
+      globalData.assigned.forEach(ch => {
+        if (!uniStats[ch.universe]) {
+          uniStats[ch.universe] = { count: 0, msgs: 0 };
+        }
+        uniStats[ch.universe].count += 1;
+        uniStats[ch.universe].msgs += ch.messages;
+      });
+
+      const unassignedCount = globalData.unassigned.length;
+      const unassignedMsgs = globalData.unassigned.reduce((acc, c) => acc + c.messages, 0);
+
+      // Unassigned Card
+      const unassignedCard = document.createElement('div');
+      const isUnassignedSelected = document.getElementById('universeFilter').value === 'UNASSIGNED';
+      unassignedCard.className = `p-4 rounded-xl border cursor-pointer transition ${
+        isUnassignedSelected 
+          ? 'bg-amber-950/50 border-amber-500 ring-2 ring-amber-500/50' 
+          : 'bg-amber-950/20 border-amber-900/60 hover:border-amber-700'
+      }`;
+      unassignedCard.onclick = () => {
+        document.getElementById('universeFilter').value = 'UNASSIGNED';
+        filterChannels();
+      };
+      unassignedCard.innerHTML = `
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">⚠️ Unassigned / Global</span>
+          <span class="text-xs text-slate-400">${unassignedCount} ch</span>
+        </div>
+        <div class="text-xl font-bold text-slate-100">${unassignedMsgs.toLocaleString()} <span class="text-xs font-normal text-slate-400">msgs</span></div>
+        <p class="text-xs text-amber-400/80 mt-1">Click to filter unassigned</p>
+      `;
+      container.appendChild(unassignedCard);
+
+      // Other Universes
+      Object.entries(uniStats).sort((a, b) => b[1].msgs - a[1].msgs).forEach(([uName, stats]) => {
+        const card = document.createElement('div');
+        const isSelected = document.getElementById('universeFilter').value === uName;
+        card.className = `p-4 rounded-xl border cursor-pointer transition ${
+          isSelected 
+            ? 'bg-indigo-950/50 border-indigo-500 ring-2 ring-indigo-500/50' 
+            : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+        }`;
+        card.onclick = () => {
+          document.getElementById('universeFilter').value = uName;
+          filterChannels();
+        };
+        card.innerHTML = `
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-semibold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 truncate max-w-[170px]" title="${uName}">🌌 ${uName}</span>
+            <span class="text-xs text-slate-400">${stats.count} ch</span>
+          </div>
+          <div class="text-xl font-bold text-slate-100">${stats.msgs.toLocaleString()} <span class="text-xs font-normal text-slate-400">msgs</span></div>
+          <p class="text-xs text-slate-400 mt-1">Click to filter</p>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function populateUniverseDropdowns() {
+      const filterSelect = document.getElementById('universeFilter');
+      const currentVal = filterSelect.value;
+      filterSelect.innerHTML = `
+        <option value="ALL">All Universes & Unassigned</option>
+        <option value="UNASSIGNED">⚠️ Show Unassigned Only (${globalData.unassigned.length})</option>
+      `;
+      globalData.universes.forEach(u => {
+        const opt = document.createElement('option');
+        opt.value = u;
+        opt.textContent = `🌌 ${u}`;
+        filterSelect.appendChild(opt);
+      });
+      filterSelect.value = currentVal || 'UNASSIGNED';
+    }
+
+    function filterChannels() {
+      const query = document.getElementById('searchInput').value.toLowerCase().trim();
+      const uniFilter = document.getElementById('universeFilter').value;
+      const sortBy = document.getElementById('sortFilter').value;
+
+      let all = [];
+      if (uniFilter === 'ALL') {
+        all = [...globalData.assigned, ...globalData.unassigned];
+      } else if (uniFilter === 'UNASSIGNED') {
+        all = [...globalData.unassigned];
+      } else {
+        all = globalData.assigned.filter(c => c.universe === uniFilter);
+      }
+
+      if (query) {
+        all = all.filter(c => 
+          c.name.toLowerCase().includes(query) || 
+          c.channel_id.includes(query) || 
+          c.universe.toLowerCase().includes(query)
+        );
+      }
+
+      if (sortBy === 'msgs_desc') {
+        all.sort((a, b) => b.messages - a.messages);
+      } else if (sortBy === 'msgs_asc') {
+        all.sort((a, b) => a.messages - b.messages);
+      } else if (sortBy === 'name_asc') {
+        all.sort((a, b) => a.name.localeCompare(b.name));
+      }
+
+      renderTable(all);
+      renderUniverseCards();
+    }
+
+    function renderTable(channels) {
+      const tbody = document.getElementById('channelsTableBody');
+      const countLabel = document.getElementById('resultsCount');
+      countLabel.textContent = `${channels.length} channels`;
+      tbody.innerHTML = '';
+
+      if (channels.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="5" class="p-8 text-center text-slate-500">
+              No matching channels found.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      channels.forEach(ch => {
+        const tr = document.createElement('tr');
+        tr.className = "hover:bg-slate-800/40 transition";
+        const isUnassigned = ch.universe === 'Unassigned';
+
+        const uniBadge = isUnassigned
+          ? `<span class="px-2.5 py-1 text-xs font-semibold rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/30">⚠️ Unassigned</span>`
+          : `<span class="px-2.5 py-1 text-xs font-semibold rounded-md bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">🌌 ${ch.universe}</span>`;
+
+        const cmd = `/universe set name: [Universe] target: ${ch.channel_id}`;
+
+        tr.innerHTML = `
+          <td class="p-4 font-medium text-slate-200 flex items-center gap-2">
+            <span>${ch.name.startsWith('#') || ch.name.startsWith('🧵') ? '💬' : '👤'}</span>
+            <span class="truncate max-w-xs md:max-w-md" title="${ch.name}">${ch.name}</span>
+          </td>
+          <td class="p-4 text-xs font-mono text-slate-400">${ch.channel_id}</td>
+          <td class="p-4 font-semibold text-slate-300">${ch.messages.toLocaleString()}</td>
+          <td class="p-4">${uniBadge}</td>
+          <td class="p-4 text-right">
+            <button onclick="navigator.clipboard.writeText('${cmd}'); alert('Copied: ${cmd}');" 
+                    class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono rounded border border-slate-700 transition" title="Click to copy command">
+              📋 Copy Command
+            </button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>

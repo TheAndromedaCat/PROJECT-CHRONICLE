@@ -1,0 +1,44 @@
+# Python Bytecode & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# DiscordChatExporter (ignore all binaries/builds inside dce, keep the folder itself)
+dce/*
+!dce/
+!dce/.gitkeep
+
+# Archive Exports & Cached Data
+exports/
+temp_exports/
+*.json
+!package.json
+!tsconfig.json
+
+# Local Databases
+violet_archive.db
+violet_archive.db-journal
+violet_archive.db-wal
+violet_archive.db-shm
+*.sqlite
+*.sqlite3
+*.db
+
+# Environment & Credentials
+.env
+.env.example
+.env.*
+!.env.template
+
+# Scratch, Test & Diagnostic Scripts
+test_*.py
+search_*.py
+find_*.py
+check_*.py
+insert_*.py
+dump_*.py
+make_*.py
+
