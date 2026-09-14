@@ -1572,7 +1572,12 @@ class AntigravitySearchBot(commands.Bot):
         intents.members = True
         intents.guilds = True
         intents.dm_messages = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+            status=discord.Status.online,
+            activity=discord.Activity(type=discord.ActivityType.custom, name="custom", state="Dusting the archives")
+        )
 
     async def setup_hook(self):
         init_db()
@@ -1586,6 +1591,13 @@ class AntigravitySearchBot(commands.Bot):
 
     async def on_ready(self):
         print(f"🚀 Success! Logged in as {self.user}")
+        try:
+            await self.change_presence(
+                status=discord.Status.online,
+                activity=discord.Activity(type=discord.ActivityType.custom, name="custom", state="Dusting the archives")
+            )
+        except Exception as e:
+            print(f"⚠️ Could not set presence: {e}")
         if DISCORD_USER_TOKEN:
             print("🔑 Discord User Token active: Full DM search with DCE enabled!")
             asyncio.get_event_loop().run_in_executor(None, refresh_dm_cache)
