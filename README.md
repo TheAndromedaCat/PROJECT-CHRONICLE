@@ -4,6 +4,26 @@ A powerful user-installable Discord App powered by Google Gemini and SQLite that
 
 ---
 
+> [!CAUTION]
+> ### ⚠️ CRITICAL WARNING: RISKS OF USING DISCORD CHAT EXPORTER (DCE) WITH USER TOKENS
+>
+> Running **DiscordChatExporter (DCE)** using a personal **Discord User Token** (`DISCORD_USER_TOKEN`) carries an **EXTREMELY HIGH RISK** of triggering Discord's automated moderation and anti-scraping systems.
+> 
+> * **Platform Manipulation Violations:** Discord's automated moderation strictly monitors rapid API calls from third-party tools on user tokens. Automated scraping or rapid channel indexing can trigger multiple instant strikes for *"Platform Manipulation"* (self-botting violations).
+> * **Account Suspension / Bans:** Violations can place your Discord account at immediate risk, resulting in temporary suspensions or permanent account bans.
+> * **Recommended Safe Mode:** Use **`bot_dcedisabled.py`**, which completely disables DCE and user-token calls. It runs 100% safely on official Discord Bot Gateway credentials and queries your pre-existing local SQLite archive (`violet_archive.db`) without making any external scraping requests.
+
+---
+
+## 📁 Bot Versions in this Repository
+
+| Script | Mode | Risk Level | Description |
+| :--- | :--- | :--- | :--- |
+| **`bot_dcedisabled.py`** | **Safe Archive Mode (Recommended)** | 🟢 **Zero Risk** | Runs strictly using official bot token (`DISCORD_BOT_TOKEN`). All DM/channel searches, lore syntheses, and character lookups query your local SQLite database (`violet_archive.db`) and Google Gemini. **No DCE or user tokens are ever invoked.** |
+| **`bot.py`** | **Live DCE Mode (Legacy)** | 🔴 **High Risk** | Attempts automated live scraping of user DMs via `DiscordChatExporter.Cli`. **Use at your own risk.** Automated scraping with user tokens violates Discord ToS and will trigger anti-abuse actions. |
+
+---
+
 ## 🚀 Setup & Installation
 
 ### 1. Install Python Dependencies
@@ -11,17 +31,7 @@ A powerful user-installable Discord App powered by Google Gemini and SQLite that
 pip install -r requirements.txt
 ```
 
-### 2. Install DiscordChatExporter CLI (DCE)
-Download the [DiscordChatExporter.Cli release](https://github.com/Tyrrrz/DiscordChatExporter/releases) for your operating system and place the extracted binaries into the `dce/` directory:
-
-* **Windows**:
-  Extract into `dce/win64/` (so that `dce/win64/DiscordChatExporter.Cli.exe` exists) or directly into `dce/DiscordChatExporter.Cli.exe`.
-* **Linux**:
-  Extract into `dce/linux-amd64/` (so that `dce/linux-amd64/DiscordChatExporter.Cli` exists) and ensure execution permissions (`chmod +x dce/linux-amd64/DiscordChatExporter.Cli`).
-
-*(Note: The `dce/` folder itself is tracked via `.gitkeep`, but binaries and dependencies are gitignored).*
-
-### 3. Configure Credentials
+### 2. Configure Credentials
 
 Create a `.env` file in the project root directory:
 
@@ -29,20 +39,16 @@ Create a `.env` file in the project root directory:
 # Discord Bot Token (from Discord Developer Portal -> Bot tab)
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 
-# Discord User Token (enables full DM search and background exports via DCE)
-DISCORD_USER_TOKEN=your_discord_user_token_here
-
-# Google Gemini API Key (from Google AI Studio)
+# Google Gemini API Key (from Google AI Studio: https://aistudio.google.com/)
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# Optional: Preferred default Gemini model
-GEMINI_MODEL=gemini-3.6-flash
+# Gemini Model
+GEMINI_MODEL=gemini-3.8-flash
 ```
 
-> **Token Distinctions:**
+> **Credential Details:**
 > - **`DISCORD_BOT_TOKEN`**: Found in [Discord Developer Portal](https://discord.com/developers/applications) $\rightarrow$ **Bot** $\rightarrow$ Click **Reset Token** (or Copy Token).
-> - **`DISCORD_USER_TOKEN`**: Your personal Discord account authorization token (used strictly by the local `DiscordChatExporter.Cli` subprocess to fetch full private DM history).
-> - **`GEMINI_API_KEY`**: Obtain from [Google AI Studio](https://aistudio.google.com/).
+> - **`GEMINI_API_KEY`**: Obtain for free from [Google AI Studio](https://aistudio.google.com/).
 
 ---
 
@@ -67,14 +73,15 @@ GEMINI_MODEL=gemini-3.6-flash
 
 ## 🏃 Run the Bot & Management Tools
 
-### Start the Discord Bot:
+### Start Safe Mode (Recommended):
 ```bash
-python bot.py
+python bot_dcedisabled.py
 ```
 
 ### Launch Interactive Universe Web Manager:
 ```bash
 python universe_manager.py
 ```
-*(Opens a local visual dashboard at `http://localhost:5050` to search, filter, and reassign channels/servers to universes).*
+*(Opens a local visual dashboard at `http://localhost:5050` to search, filter, and assign channels/servers to universes).*
+
 
