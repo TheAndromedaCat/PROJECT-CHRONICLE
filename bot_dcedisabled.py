@@ -537,7 +537,7 @@ def get_user_local_config(user_id: Optional[Union[str, int]] = None) -> Dict[str
     default_cfg = {
         "endpoint": os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:11435/v1"),
         "vision_endpoint": os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:11435/v1"),
-        "text_model": os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0"),
+        "text_model": os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hermes3:8b"),
         "deep_model": os.environ.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"),
         "vision_model": os.environ.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0")
     }
@@ -804,7 +804,7 @@ def extract_text_and_images_from_contents(contents: Any) -> Tuple[str, List[Tupl
 def generate_local_llama_content_sync(
     contents: Any,
     system_instruction: str = "",
-    temperature: float = 0.2,
+    temperature: float = 0.75,
     endpoint: str = "http://127.0.0.1:11435/v1",
     vision_endpoint: str = "http://127.0.0.1:11435/v1",
     text_model: str = "",
@@ -829,7 +829,7 @@ def generate_local_llama_content_sync(
     elif mode == "deep":
         selected_model = (deep_model or os.environ.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")).strip()
     else:
-        selected_model = (text_model or os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0")).strip()
+        selected_model = (text_model or os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hermes3:8b")).strip()
 
     messages = []
     if system_instruction:
@@ -849,7 +849,9 @@ def generate_local_llama_content_sync(
     payload = {
         "model": selected_model,
         "messages": messages,
-        "temperature": temperature,
+        "temperature": temperature if temperature is not None else 0.75,
+        "top_p": 0.9,
+        "repeat_penalty": 1.1,
         "max_tokens": 4096,
         "stream": False
     }
@@ -873,7 +875,7 @@ def generate_local_llama_content_sync(
 def generate_gemini_content_sync(
     contents: Any,
     system_instruction: str = "",
-    temperature: float = 0.1,
+    temperature: float = 0.75,
     user_id: Optional[Union[str, int]] = None,
     mode: str = "fast"
 ) -> str:
@@ -1796,16 +1798,41 @@ class AntigravitySearchBot(commands.Bot):
                     )
                     formatted_history = "\n".join(formatted_history_lines) if formatted_history_lines else "No messages found in archive for this search."
 
-                    system_instruction = build_system_instruction(channel_id=None, universe_name=uni_filter) + (
-                        "\n\n### 💬 CONVERSATIONAL DM MODE:\n"
-                        "You are chatting directly with the user in a private 1-on-1 Discord DM. "
-                        "Talk to the user like a thoughtful, helpful partner and research assistant. "
-                        "Maintain the flow of conversation naturally based on recent turns. "
-                        "You have full access to the user's entire multi-channel, multi-server, and multi-DM Discord history. "
-                        "When referencing facts, characters, or events, cite exact dates (YYYY-MM-DD), speaker usernames, and the source channel/universe. "
-                        "If characters or lore exist in multiple universes or channels, clearly explain the distinction between each version."
-                    )
+                    # Intelligent 3-Tier Model Weaving for DMs:
+                    # - If images present -> Vision Tier (7B-VL)
+                    # - If discussing canon, territory, clans, history, or lore synthesis -> Deep Lore Tier (27B)
+                    # - If casual chat, roleplay, or general conversational banter -> Fast Chat Tier (Hermes 3 8B)
+                    lore_heavy_keywords = [
+                        "clan", "territory", "border", "poison", "medicine", "leader", "deputy", "canon",
+                        "lore", "universe", "timeline", "history", "archive", "ledger", "incident", "vial",
+                        "generation", "lineage", "ancestor", "daughter", "son", "father", "mother", "sunset",
+                        "hawkheart", "rosekit", "meadowsong", "earthclan", "frostclan", "nightclan", "valley"
+                    ]
+                    is_deep_lore_query = any(k in content_lower for k in lore_heavy_keywords) or len(content) > 100
+                    dm_inference_mode = "deep" if is_deep_lore_query else "fast"
 
+                    system_instruction = build_system_instruction(channel_id=None, universe_name=uni_filter) + (
+                        "\n\n### 📜 VIOLET'S CONVERSATIONAL PERSONA (MASTER ARCHIVIST & WORLD-BUILDER):\n"
+                        "You are chatting directly with the user (your creator and collaborator) in a private Discord DM.\n"
+                        "You are Violet: brilliant, witty, highly analytical, and passionately invested in their original universes, clans, and character storylines.\n\n"
+                        "CRITICAL DIRECTIVES:\n"
+                        "1. ABSOLUTELY ZERO CORPORATE SYCOPHANCY OR ASSISTANT FILLER:\n"
+                        "   NEVER utter generic chatbot platitudes such as:\n"
+                        "   - 'If you have any other questions or need further assistance, feel free to ask!'\n"
+                        "   - 'I hope this information was helpful!'\n"
+                        "   - 'How can I assist you today?'\n"
+                        "   - 'Thank you for the information!'\n"
+                        "   Speak like an articulate, perceptive master archivist and trusted co-author.\n\n"
+                        "2. PROACTIVE LORE SYNTHESIS & CODIFICATION:\n"
+                        "   When the user explains, confirms, or asks about lore (e.g. clan politics, poisoned mice, territory boundaries, lineages):\n"
+                        "   Acknowledge and codify it with authority! Use structured headings, bold key terms, and bulleted summaries (e.g. '🏛️ **Archivist Lore Update & Territory Synthesis Confirmed**'). NEVER include manual '[Part 1/2]' tags in your output—system chunking handles Discord limits automatically.\n\n"
+                        "3. ALWAYS POSE A '🔍 Master Archivist Query':\n"
+                        "   When discussing lore or world-building, NEVER say you have no questions. "
+                        "   ALWAYS end your response with a thoughtful, probing question that connects to adjacent mysteries, diplomatic repercussions, or character fates "
+                        "(e.g., '🔍 **Master Archivist Query:** With the territory borders established, would you like to explore how the diplomatic fallout with NightClan unfolded, or examine the medicine den records regarding the recovery?').\n\n"
+                        "4. NATURAL FLOW & WIT:\n"
+                        "   If the user makes a casual remark (e.g. 'You're on local mode now!'), reply with genuine personality, humor, and enthusiasm (e.g. celebrating untethering from cloud constraints and having the local GPU cores to yourself).\n"
+                    )
                     prompt = (
                         f"### ARCHIVE CONTEXT ({scope_desc} - {total_count:,} total messages indexed):\n"
                         f"{formatted_history}\n\n"
@@ -1830,7 +1857,13 @@ class AntigravitySearchBot(commands.Bot):
 
                     final_answer = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.2, user_id=user_id)
+                        lambda: generate_gemini_content_sync(
+                            contents,
+                            system_instruction,
+                            temperature=0.75,
+                            user_id=user_id,
+                            mode=dm_inference_mode
+                        )
                     )
                     if not final_answer:
                         final_answer = "I searched through your chat archives, but couldn't find a direct record of that. Would you like me to look into a specific character, date, or scene?"
@@ -2863,7 +2896,7 @@ async def correct_lore(
             
             visual_analysis_text = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id)
+                lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.7, user_id=interaction.user.id)
             )
             if visual_analysis_text:
                 final_lore_entry = f"{correction.strip()} [Visual Ref: {visual_analysis_text[:400]}...]"
@@ -3154,7 +3187,7 @@ async def ask_anywhere(
 
         final_answer = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id,
+            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.7, user_id=interaction.user.id,
             mode=mode)
         )
         if not final_answer:
@@ -3649,7 +3682,7 @@ async def character_command(
 
         final_answer = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id)
+            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.7, user_id=interaction.user.id)
         )
         if not final_answer:
             final_answer = f"No visual analysis could be generated for {name}."

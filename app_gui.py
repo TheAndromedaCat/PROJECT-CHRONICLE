@@ -141,7 +141,7 @@ def read_env_file() -> dict:
         "OLLAMA_HOST": "127.0.0.1:11435",
         "LOCAL_LLM_ENDPOINT": "http://127.0.0.1:11435/v1",
         "LOCAL_VISION_ENDPOINT": "http://127.0.0.1:11435/v1",
-        "LOCAL_CHAT_MODEL": "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0",
+        "LOCAL_CHAT_MODEL": "hermes3:8b",
         "LOCAL_DEEP_MODEL": "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M",
         "LOCAL_VISION_MODEL": "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0",
     }
@@ -166,7 +166,7 @@ def save_env_file(data: dict) -> bool:
     """Saves updated environment variables into .env."""
     try:
         host = data.get("OLLAMA_HOST", "127.0.0.1:11435").strip() or "127.0.0.1:11435"
-        chat_model = data.get("LOCAL_CHAT_MODEL", "").strip() or "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0"
+        chat_model = data.get("LOCAL_CHAT_MODEL", "").strip() or "hermes3:8b"
         deep_model = data.get("LOCAL_DEEP_MODEL", "").strip() or "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"
         vision_model = data.get("LOCAL_VISION_MODEL", "").strip() or "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0"
 
@@ -381,7 +381,7 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
         self.var_gemini_key = tk.StringVar(value=self.env_data.get("GEMINI_API_KEY", ""))
         self.var_gemini_model = tk.StringVar(value=self.env_data.get("GEMINI_MODEL", "gemini-3.5-flash-lite"))
         self.var_ollama_host = tk.StringVar(value=self.env_data.get("OLLAMA_HOST", "127.0.0.1:11435"))
-        self.var_chat_model = tk.StringVar(value=self.env_data.get("LOCAL_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0"))
+        self.var_chat_model = tk.StringVar(value=self.env_data.get("LOCAL_CHAT_MODEL", "hermes3:8b"))
         self.var_deep_model = tk.StringVar(value=self.env_data.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"))
         self.var_vision_model = tk.StringVar(value=self.env_data.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0"))
         self.var_startup = tk.BooleanVar(value=is_startup_enabled())
