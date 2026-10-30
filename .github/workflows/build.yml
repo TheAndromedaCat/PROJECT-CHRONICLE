@@ -1,0 +1,63 @@
+name: Build AskViolet Executables
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-binaries:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            artifact_name: AskViolet-Windows
+            archive_ext: zip
+          - os: ubuntu-latest
+            artifact_name: AskViolet-Linux
+            archive_ext: tar.gz
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Linux GUI Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Install requirements & PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install TKinterModernThemes pyinstaller
+
+      - name: Build Executable via build_exe.py
+        run: |
+          python build_exe.py
+
+      - name: Archive Windows build
+        if: runner.os == 'Windows'
+        run: |
+          Compress-Archive -Path dist/AskViolet -DestinationPath AskViolet-Windows.zip
+
+      - name: Archive Linux build
+        if: runner.os == 'Linux'
+        run: |
+          tar -czvf AskViolet-Linux.tar.gz -C dist AskViolet
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.os == 'Windows' && 'AskViolet-Windows.zip' || 'AskViolet-Linux.tar.gz' }}
