@@ -140,8 +140,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_local_mode (
             user_id TEXT PRIMARY KEY,
             enabled INTEGER DEFAULT 0,
-            endpoint TEXT DEFAULT 'http://127.0.0.1:11434/v1',
-            vision_endpoint TEXT DEFAULT 'http://127.0.0.1:11434/v1',
+            endpoint TEXT DEFAULT 'http://127.0.0.1:11435/v1',
+            vision_endpoint TEXT DEFAULT 'http://127.0.0.1:11435/v1',
             text_model TEXT DEFAULT '',
             vision_model TEXT DEFAULT '',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -479,7 +479,7 @@ def set_user_local_mode(
     c = conn.cursor()
     c.execute("""
         INSERT INTO user_local_mode (user_id, enabled, endpoint, vision_endpoint, text_model, vision_model, updated_at)
-        VALUES (?, ?, COALESCE(?, 'http://127.0.0.1:11434/v1'), COALESCE(?, 'http://127.0.0.1:11434/v1'), COALESCE(?, ''), COALESCE(?, ''), CURRENT_TIMESTAMP)
+        VALUES (?, ?, COALESCE(?, 'http://127.0.0.1:11435/v1'), COALESCE(?, 'http://127.0.0.1:11435/v1'), COALESCE(?, ''), COALESCE(?, ''), CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             enabled = excluded.enabled,
             endpoint = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.endpoint END,
@@ -502,8 +502,8 @@ def set_user_local_mode(
 def get_user_local_config(user_id: Optional[Union[str, int]] = None) -> Dict[str, str]:
     """Returns local model configuration dictionary (endpoint, vision_endpoint, text_model, vision_model)."""
     default_cfg = {
-        "endpoint": os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:11434/v1"),
-        "vision_endpoint": os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:11434/v1"),
+        "endpoint": os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:11435/v1"),
+        "vision_endpoint": os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:11435/v1"),
         "text_model": os.environ.get("LOCAL_TEXT_MODEL", ""),
         "vision_model": os.environ.get("LOCAL_VISION_MODEL", "")
     }
@@ -524,7 +524,7 @@ def get_user_local_config(user_id: Optional[Union[str, int]] = None) -> Dict[str
     return default_cfg
 
 
-def get_ollama_installed_models(endpoint: str = "http://127.0.0.1:11434") -> List[str]:
+def get_ollama_installed_models(endpoint: str = "http://127.0.0.1:11435") -> List[str]:
     """Queries Ollama for list of locally installed models."""
     import httpx
     try:
@@ -733,8 +733,8 @@ def generate_local_llama_content_sync(
     contents: Any,
     system_instruction: str = "",
     temperature: float = 0.2,
-    endpoint: str = "http://127.0.0.1:11434/v1",
-    vision_endpoint: str = "http://127.0.0.1:11434/v1",
+    endpoint: str = "http://127.0.0.1:11435/v1",
+    vision_endpoint: str = "http://127.0.0.1:11435/v1",
     text_model: str = "",
     vision_model: str = ""
 ) -> str:
@@ -2945,7 +2945,7 @@ async def flush_lore_slash(interaction: discord.Interaction, universe: str = Non
     enabled="True to route requests to local Ollama/Llama.cpp server; False to use Google Gemini Cloud",
     text_model="Optional: Model tag for text (e.g. qwen3.8-27b or JonathanColetti/Qwen3.8-27B-Uncensored-GGUF)",
     vision_model="Optional: Model tag for images (e.g. mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0)",
-    endpoint="Optional: Custom endpoint (default: http://127.0.0.1:11434/v1 for Ollama)"
+    endpoint="Optional: Custom endpoint (default: http://127.0.0.1:11435/v1 for Ollama)"
 )
 async def set_local_slash(
     interaction: discord.Interaction,
