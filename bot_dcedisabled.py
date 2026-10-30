@@ -449,9 +449,9 @@ def get_last_query_and_response(channel_id: str) -> Tuple[Optional[str], Optiona
         return (None, None)
 
 
-# --- Local Llama.cpp Mode Storage & Configuration ---
+# --- Local Ollama / Llama.cpp Mode Storage & Configuration ---
 def is_user_local_mode_enabled(user_id: Optional[Union[str, int]] = None) -> bool:
-    """Checks whether local Llama.cpp inference mode is enabled for this user or globally."""
+    """Checks whether local Ollama/Llama.cpp inference mode is enabled for this user or globally."""
     if user_id:
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -466,39 +466,76 @@ def is_user_local_mode_enabled(user_id: Optional[Union[str, int]] = None) -> boo
     return os.environ.get("LOCAL_LLM_ENABLED", "false").lower() in ("true", "1", "yes")
 
 
-def set_user_local_mode(user_id: Union[str, int], enabled: bool, endpoint: Optional[str] = None, vision_endpoint: Optional[str] = None):
-    """Sets local Llama.cpp inference preference and endpoints for a user in SQLite."""
+def set_user_local_mode(
+    user_id: Union[str, int],
+    enabled: bool,
+    endpoint: Optional[str] = None,
+    vision_endpoint: Optional[str] = None,
+    text_model: Optional[str] = None,
+    vision_model: Optional[str] = None
+):
+    """Sets local inference preference, models, and endpoints for a user in SQLite."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
-        INSERT INTO user_local_mode (user_id, enabled, endpoint, vision_endpoint, updated_at)
-        VALUES (?, ?, COALESCE(?, 'http://127.0.0.1:8080/v1'), COALESCE(?, 'http://127.0.0.1:8081/v1'), CURRENT_TIMESTAMP)
+        INSERT INTO user_local_mode (user_id, enabled, endpoint, vision_endpoint, text_model, vision_model, updated_at)
+        VALUES (?, ?, COALESCE(?, 'http://127.0.0.1:11434/v1'), COALESCE(?, 'http://127.0.0.1:11434/v1'), COALESCE(?, ''), COALESCE(?, ''), CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             enabled = excluded.enabled,
             endpoint = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.endpoint END,
             vision_endpoint = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.vision_endpoint END,
+            text_model = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.text_model END,
+            vision_model = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.vision_model END,
             updated_at = CURRENT_TIMESTAMP
-    """, (str(user_id), 1 if enabled else 0, endpoint, vision_endpoint, endpoint, endpoint, vision_endpoint, vision_endpoint))
+    """, (
+        str(user_id), 1 if enabled else 0,
+        endpoint, vision_endpoint, text_model, vision_model,
+        endpoint, endpoint,
+        vision_endpoint, vision_endpoint,
+        text_model, text_model,
+        vision_model, vision_model
+    ))
     conn.commit()
     conn.close()
 
 
-def get_user_local_endpoints(user_id: Optional[Union[str, int]] = None) -> Tuple[str, str]:
-    """Returns (endpoint, vision_endpoint) for Llama.cpp servers."""
-    default_ep = os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:8080/v1")
-    default_vip = os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:8081/v1")
+def get_user_local_config(user_id: Optional[Union[str, int]] = None) -> Dict[str, str]:
+    """Returns local model configuration dictionary (endpoint, vision_endpoint, text_model, vision_model)."""
+    default_cfg = {
+        "endpoint": os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:11434/v1"),
+        "vision_endpoint": os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:11434/v1"),
+        "text_model": os.environ.get("LOCAL_TEXT_MODEL", ""),
+        "vision_model": os.environ.get("LOCAL_VISION_MODEL", "")
+    }
     if user_id:
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("SELECT endpoint, vision_endpoint FROM user_local_mode WHERE user_id = ?", (str(user_id),))
+            c.execute("SELECT endpoint, vision_endpoint, text_model, vision_model FROM user_local_mode WHERE user_id = ?", (str(user_id),))
             row = c.fetchone()
             conn.close()
             if row:
-                return row[0] or default_ep, row[1] or default_vip
+                default_cfg["endpoint"] = row[0] or default_cfg["endpoint"]
+                default_cfg["vision_endpoint"] = row[1] or default_cfg["vision_endpoint"]
+                default_cfg["text_model"] = row[2] or default_cfg["text_model"]
+                default_cfg["vision_model"] = row[3] or default_cfg["vision_model"]
         except Exception:
             pass
-    return default_ep, default_vip
+    return default_cfg
+
+
+def get_ollama_installed_models(endpoint: str = "http://127.0.0.1:11434") -> List[str]:
+    """Queries Ollama for list of locally installed models."""
+    import httpx
+    try:
+        base = endpoint.rstrip("/").removesuffix("/v1")
+        with httpx.Client(timeout=2.0) as client:
+            r = client.get(f"{base}/api/tags")
+            if r.status_code == 200:
+                return [m["name"] for m in r.json().get("models", [])]
+    except Exception:
+        pass
+    return []
 
 
 
@@ -639,10 +676,12 @@ def get_model_pool_status(user_id: Optional[Union[str, int]] = None) -> List[str
     
     # 1. Local Mode indicator
     if is_user_local_mode_enabled(user_id):
-        endpoint, vision_endpoint = get_user_local_endpoints(user_id)
-        status_list.append(f"🖥️ **Local Llama.cpp Mode:** 🟢 **ACTIVE** (Text: `{endpoint}` | Vision: `{vision_endpoint}`)")
+        cfg = get_user_local_config(user_id)
+        tm_tag = f"Text: `{cfg['text_model'] or 'Auto-Detect'}`"
+        vm_tag = f"Vision: `{cfg['vision_model'] or 'Auto-Detect'}`"
+        status_list.append(f"🖥️ **Local Ollama / Llama.cpp Mode:** 🟢 **ACTIVE**\n   ↳ Endpoint: `{cfg['endpoint']}` | {tm_tag} | {vm_tag}")
     else:
-        status_list.append(f"🖥️ **Local Llama.cpp Mode:** ⚪ Disabled (Use `/setlocal enabled: True` to switch)")
+        status_list.append(f"🖥️ **Local Ollama Mode:** ⚪ Disabled (Use `/setlocal enabled: True` to switch)")
 
     primary = (os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     seen = set()
@@ -694,16 +733,29 @@ def generate_local_llama_content_sync(
     contents: Any,
     system_instruction: str = "",
     temperature: float = 0.2,
-    endpoint: str = "http://127.0.0.1:8080/v1",
-    vision_endpoint: str = "http://127.0.0.1:8081/v1"
+    endpoint: str = "http://127.0.0.1:11434/v1",
+    vision_endpoint: str = "http://127.0.0.1:11434/v1",
+    text_model: str = "",
+    vision_model: str = ""
 ) -> str:
-    """Dispatches text or vision requests to local Llama.cpp / Qwen server via OpenAI-compatible API."""
+    """Dispatches text or vision requests to local Ollama or Llama.cpp server via OpenAI-compatible API."""
     import httpx
     text_prompt, images = extract_text_and_images_from_contents(contents)
     
-    # If images are present, route to vision endpoint (or endpoint if only one server is running)
     target_base = vision_endpoint if (images and vision_endpoint) else endpoint
     target_url = target_base.rstrip("/") + "/chat/completions"
+
+    # Auto-resolve model for Ollama if not specified
+    selected_model = (vision_model if images else text_model).strip()
+    if not selected_model:
+        installed = get_ollama_installed_models(target_base)
+        if installed:
+            if images:
+                selected_model = next((m for m in installed if any(k in m.lower() for k in ("vl", "vision", "caption", "llava"))), installed[0])
+            else:
+                selected_model = next((m for m in installed if not any(k in m.lower() for k in ("vl", "caption"))), installed[0])
+        else:
+            selected_model = "mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0" if images else "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
 
     messages = []
     if system_instruction:
@@ -721,14 +773,15 @@ def generate_local_llama_content_sync(
         messages.append({"role": "user", "content": text_prompt})
 
     payload = {
+        "model": selected_model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": 4096,
         "stream": False
     }
 
-    # Connect with generous timeout for local models running on CPU/GPU
-    with httpx.Client(timeout=180.0) as client:
+    print(f"🖥️ [Local Inference] Dispatching to '{selected_model}' at {target_url}...")
+    with httpx.Client(timeout=240.0) as client:
         resp = client.post(target_url, json=payload)
         resp.raise_for_status()
         data = resp.json()
@@ -741,24 +794,25 @@ def generate_gemini_content_sync(
     temperature: float = 0.1,
     user_id: Optional[Union[str, int]] = None
 ) -> str:
-    """Generates content via Local Llama.cpp (if enabled) or Gemini Cloud with automatic tier fallback."""
-    # 1. Check if user has local Llama.cpp mode enabled
+    """Generates content via Local Ollama/Llama.cpp (if enabled) or Gemini Cloud with automatic tier fallback."""
+    # 1. Check if user has local Ollama / Llama.cpp mode enabled
     if is_user_local_mode_enabled(user_id):
-        endpoint, vision_endpoint = get_user_local_endpoints(user_id)
+        cfg = get_user_local_config(user_id)
         try:
-            print(f"🖥️ [Local Mode] Routing generation to Llama.cpp endpoint: {endpoint}...")
             local_ans = generate_local_llama_content_sync(
                 contents=contents,
                 system_instruction=system_instruction,
                 temperature=temperature,
-                endpoint=endpoint,
-                vision_endpoint=vision_endpoint
+                endpoint=cfg["endpoint"],
+                vision_endpoint=cfg["vision_endpoint"],
+                text_model=cfg["text_model"],
+                vision_model=cfg["vision_model"]
             )
             if local_ans:
-                print(f"✅ Local Llama.cpp model successfully generated response.")
+                print(f"✅ Local model successfully generated response.")
                 return local_ans
         except Exception as e:
-            print(f"⚠️ [Local Mode Error] Could not connect to Llama.cpp ({e}). Falling back to Google Gemini Cloud...")
+            print(f"⚠️ [Local Mode Error] Could not connect to local server ({e}). Falling back to Google Gemini Cloud...")
 
     # 2. Cloud Gemini Model Pool Fallback
     model_pool = get_active_model_pool()
@@ -2883,20 +2937,22 @@ async def flush_lore_slash(interaction: discord.Interaction, universe: str = Non
         await interaction.followup.send(f"❌ Failed to flush lore: {str(e)}", ephemeral=is_ephemeral)
 
 
-# 11d. /setlocal Slash Command (Toggle Local Llama.cpp Mode)
-@bot.tree.command(name="setlocal", description="Toggle local Llama.cpp / Qwen model inference vs Google Gemini Cloud")
+# 11d. /setlocal Slash Command (Toggle Local Ollama / Llama.cpp Mode)
+@bot.tree.command(name="setlocal", description="Toggle local Ollama / Llama.cpp model inference vs Google Gemini Cloud")
 @app_commands.user_install()
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(
-    enabled="True to route requests to local Llama.cpp server; False to use Google Gemini Cloud",
-    endpoint="Optional: Custom text LLM endpoint (default: http://127.0.0.1:8080/v1)",
-    vision_endpoint="Optional: Custom Vision LLM endpoint for images (default: http://127.0.0.1:8081/v1)"
+    enabled="True to route requests to local Ollama/Llama.cpp server; False to use Google Gemini Cloud",
+    text_model="Optional: Model tag for text (e.g. qwen3.8-27b or JonathanColetti/Qwen3.8-27B-Uncensored-GGUF)",
+    vision_model="Optional: Model tag for images (e.g. mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0)",
+    endpoint="Optional: Custom endpoint (default: http://127.0.0.1:11434/v1 for Ollama)"
 )
 async def set_local_slash(
     interaction: discord.Interaction,
     enabled: bool,
-    endpoint: str = None,
-    vision_endpoint: str = None
+    text_model: str = None,
+    vision_model: str = None,
+    endpoint: str = None
 ):
     is_ephemeral = await should_be_ephemeral(interaction)
     try:
@@ -2906,19 +2962,25 @@ async def set_local_slash(
         pass
 
     try:
+        clean_ep = endpoint.strip() if endpoint else None
         set_user_local_mode(
             user_id=interaction.user.id,
             enabled=enabled,
-            endpoint=endpoint.strip() if endpoint else None,
-            vision_endpoint=vision_endpoint.strip() if vision_endpoint else None
+            endpoint=clean_ep,
+            vision_endpoint=clean_ep,
+            text_model=text_model.strip() if text_model else None,
+            vision_model=vision_model.strip() if vision_model else None
         )
-        active_ep, active_vip = get_user_local_endpoints(interaction.user.id)
+        cfg = get_user_local_config(interaction.user.id)
         if enabled:
+            tm_str = cfg['text_model'] or 'Auto-Detect / Default'
+            vm_str = cfg['vision_model'] or 'Auto-Detect / Default'
             msg = (
-                f"## 🖥️ Local Model Inference Mode: **ENABLED**\n\n"
-                f"• **Text LLM Endpoint:** `{active_ep}` *(e.g. Qwen3.8-27B on port 8080)*\n"
-                f"• **Vision Model Endpoint:** `{active_vip}` *(e.g. Qwen2.5-VL-7B on port 8081)*\n"
-                f"• **Cloud Fallback:** Automatic (Falls back to Gemini Cloud if local server is unreachable)\n\n"
+                f"## 🖥️ Local Model Inference Mode: **ENABLED (Ollama / Llama.cpp)**\n\n"
+                f"• **Endpoint:** `{cfg['endpoint']}`\n"
+                f"• **Text Lore Model:** `{tm_str}`\n"
+                f"• **Vision Model (Images):** `{vm_str}`\n"
+                f"• **Cloud Fallback:** Automatic (Falls back to Gemini Cloud if Ollama is unreachable)\n\n"
                 f"⚡ *All future searches, lore queries, and DMs will now be processed 100% locally on your machine with zero API quota usage!*"
             )
         else:

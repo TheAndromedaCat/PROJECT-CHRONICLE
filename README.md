@@ -97,7 +97,7 @@ python lore_manager.py
 ### Discord Slash Commands for Lore Management & Local LLM:
 * **`/addlore topic: [title] content: [details] universe: [Universe]`**: Record new lore directly from Discord without DCE.
 * **`/flushlore universe: [Universe]`**: Flush recent DM discussions into permanent Markdown files and SQLite.
-* **`/setlocal enabled: True/False [endpoint] [vision_endpoint]`**: Toggle 100% offline local inference via Llama.cpp / Qwen vs Google Gemini Cloud. Automatically falls back to cloud if local server is unreachable.
+* **`/setlocal enabled: True/False [text_model] [vision_model] [endpoint]`**: Toggle 100% offline local inference via Ollama (or Llama.cpp) vs Google Gemini Cloud. Automatically falls back to cloud if local server is unreachable.
 
 
 
