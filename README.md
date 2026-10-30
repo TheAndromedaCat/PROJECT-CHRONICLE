@@ -1,4 +1,4 @@
-# Antigravity User-Installable Discord App & Lore Archivist (AskViolet)
+# User-Installable Discord App & Lore Archivist (AskViolet)
 
 A powerful user-installable Discord App powered by Google Gemini and SQLite that indexes, searches, and synthesizes roleplay archives, character backstories, and multi-universe timelines across servers and DMs.
 
