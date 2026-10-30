@@ -110,8 +110,30 @@ Comment=AskViolet Discord Bot
 # ==========================================
 # .env Configuration Parser & Writer
 # ==========================================
+def get_installed_ollama_models(endpoint: str = "http://127.0.0.1:11435") -> list:
+    """Fetches real-time list of installed Ollama models."""
+    import urllib.request
+    import json
+    base = endpoint.rstrip("/").removesuffix("/v1")
+    try:
+        req = urllib.request.Request(f"{base}/api/tags", headers={"User-Agent": "AskViolet"})
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            data = json.loads(r.read().decode())
+            return [m["name"] for m in data.get("models", [])]
+    except Exception:
+        pass
+    return [
+        "qwen-coder-32k:latest",
+        "qwen3.8-16k:latest",
+        "qwen-caption-32k:latest",
+        "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0",
+        "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M",
+        "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0"
+    ]
+
+
 def read_env_file() -> dict:
-    """Reads .env into a dictionary while preserving comments."""
+    """Reads .env into a dictionary while preserving default values."""
     cfg = {
         "DISCORD_BOT_TOKEN": "",
         "GEMINI_API_KEY": "",
@@ -119,7 +141,8 @@ def read_env_file() -> dict:
         "OLLAMA_HOST": "127.0.0.1:11435",
         "LOCAL_LLM_ENDPOINT": "http://127.0.0.1:11435/v1",
         "LOCAL_VISION_ENDPOINT": "http://127.0.0.1:11435/v1",
-        "LOCAL_TEXT_MODEL": "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M",
+        "LOCAL_CHAT_MODEL": "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0",
+        "LOCAL_DEEP_MODEL": "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M",
         "LOCAL_VISION_MODEL": "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0",
     }
     if not ENV_PATH.exists():
@@ -142,18 +165,25 @@ def read_env_file() -> dict:
 def save_env_file(data: dict) -> bool:
     """Saves updated environment variables into .env."""
     try:
+        host = data.get("OLLAMA_HOST", "127.0.0.1:11435").strip() or "127.0.0.1:11435"
+        chat_model = data.get("LOCAL_CHAT_MODEL", "").strip() or "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0"
+        deep_model = data.get("LOCAL_DEEP_MODEL", "").strip() or "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"
+        vision_model = data.get("LOCAL_VISION_MODEL", "").strip() or "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0"
+
         lines = [
             "# AskViolet Configuration",
             f"DISCORD_BOT_TOKEN={data.get('DISCORD_BOT_TOKEN', '').strip()}",
             f"GEMINI_API_KEY={data.get('GEMINI_API_KEY', '').strip()}",
             f"GEMINI_MODEL={data.get('GEMINI_MODEL', 'gemini-3.5-flash-lite').strip()}",
             "",
-            "# Local Ollama / Hardware LLM Endpoint (Avoids port 11434 conflict)",
-            f"OLLAMA_HOST={data.get('OLLAMA_HOST', '127.0.0.1:11435').strip()}",
-            f"LOCAL_LLM_ENDPOINT=http://{data.get('OLLAMA_HOST', '127.0.0.1:11435').strip()}/v1",
-            f"LOCAL_VISION_ENDPOINT=http://{data.get('OLLAMA_HOST', '127.0.0.1:11435').strip()}/v1",
-            f"LOCAL_TEXT_MODEL={data.get('LOCAL_TEXT_MODEL', '').strip()}",
-            f"LOCAL_VISION_MODEL={data.get('LOCAL_VISION_MODEL', '').strip()}",
+            "# Local Ollama / 3-Tier Hardware Inference (Port 11435)",
+            f"OLLAMA_HOST={host}",
+            f"LOCAL_LLM_ENDPOINT=http://{host}/v1",
+            f"LOCAL_VISION_ENDPOINT=http://{host}/v1",
+            f"LOCAL_CHAT_MODEL={chat_model}",
+            f"LOCAL_DEEP_MODEL={deep_model}",
+            f"LOCAL_VISION_MODEL={vision_model}",
+            f"LOCAL_TEXT_MODEL={chat_model}",
             "",
         ]
         with open(ENV_PATH, "w", encoding="utf-8") as f:
@@ -173,15 +203,15 @@ import TKinterModernThemes as tkm
 class AskVioletThemedApp(tkm.ThemedTKinterFrame):
     def __init__(self):
         super().__init__(
-            title="AskViolet - Bot & Local LLM Manager",
+            title="AskViolet - Bot & 3-Tier Local LLM Manager",
             theme="sun-valley",
             mode="dark",
             usecommandlineargs=False,
             useconfigfile=False,
         )
 
-        self.root.geometry("900x650")
-        self.root.minsize(740, 500)
+        self.root.geometry("920x680")
+        self.root.minsize(760, 520)
 
         # Process management
         self.bot_process: subprocess.Popen = None
@@ -201,15 +231,14 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_tabs(self):
-        # Create Notebook with tabs
         self.notebook = self.Notebook("MainNotebook", row=0, col=0, sticky="nsew", padx=10, pady=10)
 
         # Tab 1: Live Console & Bot Controls
         self.tab_console = self.notebook.addTab("🎮 Bot Dashboard & Logs")
         self._build_console_tab(self.tab_console)
 
-        # Tab 2: Environment Variables & Settings
-        self.tab_settings = self.notebook.addTab("⚙️ Environment & API Keys")
+        # Tab 2: Environment Variables & 3-Tier Model Settings
+        self.tab_settings = self.notebook.addTab("⚙️ Environment & 3-Tier AI")
         self._build_settings_tab(self.tab_settings)
 
     # ----------------------------------------------------
@@ -324,7 +353,7 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
         self.log_text.tag_config("error", foreground="#f87171")
 
         self.append_log(f"AskViolet UI Initialized. Root Directory: {APP_DIR}", "info")
-        self.append_log("Safe Mode Active (DCE Disabled). Click 'Start Bot' to launch.", "success")
+        self.append_log("Safe Mode Active (DCE Disabled). 3-Tier AI Routing Configured.", "success")
 
     # ----------------------------------------------------
     # Tab 2: Settings & Environment Configuration
@@ -352,13 +381,27 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
         self.var_gemini_key = tk.StringVar(value=self.env_data.get("GEMINI_API_KEY", ""))
         self.var_gemini_model = tk.StringVar(value=self.env_data.get("GEMINI_MODEL", "gemini-3.5-flash-lite"))
         self.var_ollama_host = tk.StringVar(value=self.env_data.get("OLLAMA_HOST", "127.0.0.1:11435"))
-        self.var_local_text = tk.StringVar(value=self.env_data.get("LOCAL_TEXT_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"))
-        self.var_local_vision = tk.StringVar(value=self.env_data.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0"))
+        self.var_chat_model = tk.StringVar(value=self.env_data.get("LOCAL_CHAT_MODEL", "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0"))
+        self.var_deep_model = tk.StringVar(value=self.env_data.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"))
+        self.var_vision_model = tk.StringVar(value=self.env_data.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0"))
         self.var_startup = tk.BooleanVar(value=is_startup_enabled())
 
-        def add_field(parent, label_text: str, var: tk.Variable, is_secret: bool = False, note: str = ""):
+        # Fetch installed Ollama models for dropdowns
+        ollama_models = get_installed_ollama_models(self.var_ollama_host.get())
+
+        gemini_choices = [
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-3.8-flash",
+            "gemini-3.6-flash",
+            "gemini-3-flash",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite"
+        ]
+
+        def add_field(parent, label_text: str, var: tk.Variable, is_secret: bool = False, note: str = "", choices: list = None):
             row = ttk.Frame(parent)
-            row.pack(fill=tk.X, padx=12, pady=6)
+            row.pack(fill=tk.X, padx=12, pady=5)
 
             lbl = ttk.Label(row, text=label_text, font=("Segoe UI", 9, "bold"))
             lbl.pack(anchor="w")
@@ -370,38 +413,43 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
             entry_row = ttk.Frame(row)
             entry_row.pack(fill=tk.X)
 
-            show_char = "•" if is_secret else ""
-            ent = ttk.Entry(entry_row, textvariable=var, show=show_char, font=("Segoe UI", 9))
-            ent.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            if choices:
+                combo = ttk.Combobox(entry_row, textvariable=var, values=choices, font=("Segoe UI", 9))
+                combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            else:
+                show_char = "•" if is_secret else ""
+                ent = ttk.Entry(entry_row, textvariable=var, show=show_char, font=("Segoe UI", 9))
+                ent.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-            if is_secret:
-                def toggle_mask():
-                    if ent.cget("show") == "":
-                        ent.config(show="•")
-                    else:
-                        ent.config(show="")
-                btn_eye = tk.Button(entry_row, text="👁", relief=tk.FLAT, bg="#2e2844", fg="#ffffff", command=toggle_mask, padx=6)
-                btn_eye.pack(side=tk.LEFT, padx=(5, 0))
+                if is_secret:
+                    def toggle_mask():
+                        if ent.cget("show") == "":
+                            ent.config(show="•")
+                        else:
+                            ent.config(show="")
+                    btn_eye = tk.Button(entry_row, text="👁", relief=tk.FLAT, bg="#2e2844", fg="#ffffff", command=toggle_mask, padx=6)
+                    btn_eye.pack(side=tk.LEFT, padx=(5, 0))
 
         # Section 1: Core Discord & Cloud AI Credentials
-        sec1 = ttk.LabelFrame(scrollable_frame, text="🔑 Core Cloud Credentials", padding=10)
-        sec1.pack(fill=tk.X, padx=10, pady=8)
+        sec1 = ttk.LabelFrame(scrollable_frame, text="🔑 Core Discord & Cloud Credentials", padding=10)
+        sec1.pack(fill=tk.X, padx=10, pady=6)
 
         add_field(sec1, "Discord Bot Token (DISCORD_BOT_TOKEN)", self.var_discord_token, is_secret=True, note="From Discord Developer Portal -> Bot -> Reset/Copy Token")
         add_field(sec1, "Google Gemini API Key (GEMINI_API_KEY)", self.var_gemini_key, is_secret=True, note="From Google AI Studio (aistudio.google.com)")
-        add_field(sec1, "Default Gemini Model (GEMINI_MODEL)", self.var_gemini_model, is_secret=False, note="e.g. gemini-3.5-flash-lite, gemini-3.8-flash, gemini-3.1-flash-lite")
+        add_field(sec1, "Default Gemini Model (GEMINI_MODEL)", self.var_gemini_model, is_secret=False, note="e.g. gemini-3.5-flash-lite, gemini-3.8-flash, gemini-3.1-flash-lite", choices=gemini_choices)
 
-        # Section 2: Local LLM & Ollama Configuration
-        sec2 = ttk.LabelFrame(scrollable_frame, text="🖥️ Local Hardware / Ollama Inference", padding=10)
-        sec2.pack(fill=tk.X, padx=10, pady=8)
+        # Section 2: 3-Tier Local Hardware AI Models
+        sec2 = ttk.LabelFrame(scrollable_frame, text="🖥️ 3-Tier Local Hardware AI (Ollama / RTX 3060 12GB)", padding=10)
+        sec2.pack(fill=tk.X, padx=10, pady=6)
 
         add_field(sec2, "Ollama Server Host (OLLAMA_HOST)", self.var_ollama_host, is_secret=False, note="Default: 127.0.0.1:11435 (avoids Windows port 11434 conflict)")
-        add_field(sec2, "Local Text Model (LOCAL_TEXT_MODEL)", self.var_local_text, is_secret=False, note="GGUF model pulled via Ollama (e.g. hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M)")
-        add_field(sec2, "Local Vision Model (LOCAL_VISION_MODEL)", self.var_local_vision, is_secret=False, note="Vision GGUF model for image questions (e.g. hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0)")
+        add_field(sec2, "⚡ Fast Chat Tier (7B) - Roleplay & Casual Lore", self.var_chat_model, is_secret=False, note="~90 tok/s in VRAM (Select from installed Ollama models or type tag)", choices=ollama_models)
+        add_field(sec2, "🧠 Deep Lore Tier (27B) - Timelines & Dossier Audits", self.var_deep_model, is_secret=False, note="High IQ context analysis (Select from installed Ollama models or type tag)", choices=ollama_models)
+        add_field(sec2, "👁️ Vision Tier (7B-VL) - Photo & Visual Lore OCR", self.var_vision_model, is_secret=False, note="Multimodal visual analysis (Select from installed Ollama models or type tag)", choices=ollama_models)
 
         # Section 3: System Startup Options
         sec3 = ttk.LabelFrame(scrollable_frame, text="🚀 System Startup & Autostart", padding=10)
-        sec3.pack(fill=tk.X, padx=10, pady=8)
+        sec3.pack(fill=tk.X, padx=10, pady=6)
 
         chk_startup = ttk.Checkbutton(
             sec3,
@@ -413,7 +461,7 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
 
         # Action Buttons
         btn_frame = ttk.Frame(scrollable_frame)
-        btn_frame.pack(fill=tk.X, padx=10, pady=12)
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
 
         btn_save = tk.Button(
             btn_frame,
@@ -447,8 +495,9 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
             "GEMINI_API_KEY": self.var_gemini_key.get().strip(),
             "GEMINI_MODEL": self.var_gemini_model.get().strip() or "gemini-3.5-flash-lite",
             "OLLAMA_HOST": self.var_ollama_host.get().strip() or "127.0.0.1:11435",
-            "LOCAL_TEXT_MODEL": self.var_local_text.get().strip(),
-            "LOCAL_VISION_MODEL": self.var_local_vision.get().strip(),
+            "LOCAL_CHAT_MODEL": self.var_chat_model.get().strip(),
+            "LOCAL_DEEP_MODEL": self.var_deep_model.get().strip(),
+            "LOCAL_VISION_MODEL": self.var_vision_model.get().strip(),
         }
         if save_env_file(updated):
             self.env_data = updated
@@ -596,9 +645,24 @@ class AskVioletThemedApp(tkm.ThemedTKinterFrame):
                 with urllib.request.urlopen(req, timeout=3) as resp:
                     data = json.loads(resp.read().decode())
                     models = [m.get("name") for m in data.get("models", [])]
-                    msg = f"Ollama is ONLINE at {endpoint}!\nInstalled models ({len(models)}):\n" + "\n".join(f"• {m}" for m in models)
-                    self.root.after(0, lambda: messagebox.showinfo("Ollama Health", msg))
-                    self.root.after(0, lambda: self.append_log(f"Ollama connected ({len(models)} models ready).", "success"))
+                    
+                    # Check 3-tier status
+                    chat_m = self.var_chat_model.get().strip()
+                    deep_m = self.var_deep_model.get().strip()
+                    vis_m = self.var_vision_model.get().strip()
+
+                    def check_tag(target):
+                        return "✅ Ready" if any(target.lower() in m.lower() for m in models) else "⏳ Pending download"
+
+                    msg = (
+                        f"Ollama is ONLINE at {endpoint}!\n\n"
+                        f"• Fast Chat (7B): {check_tag(chat_m)}\n"
+                        f"• Deep Lore (27B): {check_tag(deep_m)}\n"
+                        f"• Vision (7B-VL): {check_tag(vis_m)}\n\n"
+                        f"Total installed models ({len(models)}):\n" + "\n".join(f"• {m}" for m in models)
+                    )
+                    self.root.after(0, lambda: messagebox.showinfo("Ollama 3-Tier Status", msg))
+                    self.root.after(0, lambda: self.append_log(f"Ollama connected ({len(models)} models available).", "success"))
             except Exception as e:
                 err_msg = f"Could not connect to Ollama at {endpoint}:\n{e}"
                 self.root.after(0, lambda: messagebox.showwarning("Ollama Offline", err_msg))

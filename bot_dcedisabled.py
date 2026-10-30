@@ -143,6 +143,7 @@ def init_db():
             endpoint TEXT DEFAULT 'http://127.0.0.1:11435/v1',
             vision_endpoint TEXT DEFAULT 'http://127.0.0.1:11435/v1',
             text_model TEXT DEFAULT '',
+            deep_model TEXT DEFAULT '',
             vision_model TEXT DEFAULT '',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -151,6 +152,10 @@ def init_db():
     # Auto-migrate older schema versions
     try:
         cursor.execute("ALTER TABLE user_local_mode ADD COLUMN text_model TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE user_local_mode ADD COLUMN deep_model TEXT DEFAULT ''")
     except Exception:
         pass
     try:
@@ -466,33 +471,61 @@ def is_user_local_mode_enabled(user_id: Optional[Union[str, int]] = None) -> boo
     return os.environ.get("LOCAL_LLM_ENABLED", "false").lower() in ("true", "1", "yes")
 
 
+def sync_setting_to_env(key: str, value: str):
+    """Updates a key-value pair in .env file and in os.environ."""
+    os.environ[key] = str(value)
+    env_file = BASE_DIR / ".env"
+    if not env_file.exists():
+        return
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith(f"{key}="):
+                new_lines.append(f"{key}={value}\n")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(f"{key}={value}\n")
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        print(f"⚠️ Error syncing {key} to .env: {e}")
+
+
 def set_user_local_mode(
     user_id: Union[str, int],
     enabled: bool,
     endpoint: Optional[str] = None,
     vision_endpoint: Optional[str] = None,
     text_model: Optional[str] = None,
+    deep_model: Optional[str] = None,
     vision_model: Optional[str] = None
 ):
-    """Sets local inference preference, models, and endpoints for a user in SQLite."""
+    """Sets 3-tier local inference preferences, models, and endpoints for a user in SQLite."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
-        INSERT INTO user_local_mode (user_id, enabled, endpoint, vision_endpoint, text_model, vision_model, updated_at)
-        VALUES (?, ?, COALESCE(?, 'http://127.0.0.1:11435/v1'), COALESCE(?, 'http://127.0.0.1:11435/v1'), COALESCE(?, ''), COALESCE(?, ''), CURRENT_TIMESTAMP)
+        INSERT INTO user_local_mode (user_id, enabled, endpoint, vision_endpoint, text_model, deep_model, vision_model, updated_at)
+        VALUES (?, ?, COALESCE(?, 'http://127.0.0.1:11435/v1'), COALESCE(?, 'http://127.0.0.1:11435/v1'), COALESCE(?, ''), COALESCE(?, ''), COALESCE(?, ''), CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             enabled = excluded.enabled,
             endpoint = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.endpoint END,
             vision_endpoint = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.vision_endpoint END,
             text_model = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.text_model END,
+            deep_model = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.deep_model END,
             vision_model = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.vision_model END,
             updated_at = CURRENT_TIMESTAMP
     """, (
         str(user_id), 1 if enabled else 0,
-        endpoint, vision_endpoint, text_model, vision_model,
+        endpoint, vision_endpoint, text_model, deep_model, vision_model,
         endpoint, endpoint,
         vision_endpoint, vision_endpoint,
         text_model, text_model,
+        deep_model, deep_model,
         vision_model, vision_model
     ))
     conn.commit()
@@ -500,44 +533,83 @@ def set_user_local_mode(
 
 
 def get_user_local_config(user_id: Optional[Union[str, int]] = None) -> Dict[str, str]:
-    """Returns local model configuration dictionary (endpoint, vision_endpoint, text_model, vision_model)."""
+    """Returns 3-tier local model configuration dictionary."""
     default_cfg = {
         "endpoint": os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:11435/v1"),
         "vision_endpoint": os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:11435/v1"),
-        "text_model": os.environ.get("LOCAL_TEXT_MODEL", ""),
-        "vision_model": os.environ.get("LOCAL_VISION_MODEL", "")
+        "text_model": os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0"),
+        "deep_model": os.environ.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"),
+        "vision_model": os.environ.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0")
     }
     if user_id:
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("SELECT endpoint, vision_endpoint, text_model, vision_model FROM user_local_mode WHERE user_id = ?", (str(user_id),))
+            c.execute("SELECT endpoint, vision_endpoint, text_model, deep_model, vision_model FROM user_local_mode WHERE user_id = ?", (str(user_id),))
             row = c.fetchone()
             conn.close()
             if row:
                 default_cfg["endpoint"] = row[0] or default_cfg["endpoint"]
                 default_cfg["vision_endpoint"] = row[1] or default_cfg["vision_endpoint"]
                 default_cfg["text_model"] = row[2] or default_cfg["text_model"]
-                default_cfg["vision_model"] = row[3] or default_cfg["vision_model"]
+                default_cfg["deep_model"] = row[3] or default_cfg["deep_model"]
+                default_cfg["vision_model"] = row[4] or default_cfg["vision_model"]
         except Exception:
             pass
     return default_cfg
 
 
 def get_ollama_installed_models(endpoint: str = "http://127.0.0.1:11435") -> List[str]:
-    """Queries Ollama for list of locally installed models."""
-    import httpx
+    """Queries Ollama for list of locally installed models via HTTP API with CLI fallback."""
+    import urllib.request
+    import json
+    import subprocess
+    import shutil
+
+    models = []
+    base = endpoint.rstrip("/").removesuffix("/v1")
+    url = f"{base}/api/tags"
+
+    # 1. Try HTTP API
     try:
-        base = endpoint.rstrip("/").removesuffix("/v1")
-        with httpx.Client(timeout=2.0) as client:
-            r = client.get(f"{base}/api/tags")
-            if r.status_code == 200:
-                return [m["name"] for m in r.json().get("models", [])]
+        req = urllib.request.Request(url, headers={"User-Agent": "AskViolet"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode())
+            for m in data.get("models", []):
+                name = m.get("name")
+                if name:
+                    models.append(name)
+        if models:
+            return models
     except Exception:
         pass
-    return []
 
+    # 2. Try CLI fallback (ollama list)
+    try:
+        env = os.environ.copy()
+        if "11435" in endpoint:
+            env["OLLAMA_HOST"] = "127.0.0.1:11435"
+        res = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=3, env=env)
+        if res.returncode == 0:
+            lines = res.stdout.strip().splitlines()
+            for line in lines[1:]:  # skip header
+                parts = line.split()
+                if parts:
+                    models.append(parts[0])
+        if models:
+            return models
+    except Exception:
+        pass
 
+    # 3. Known fallback models if server is starting up
+    return [
+        "qwen-coder-32k:latest",
+        "qwen3.8-16k:latest",
+        "qwen-caption-32k:latest",
+        "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0",
+        "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M",
+        "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0"
+    ]
 
 def save_lore_override(channel_id: str, target_name: str, topic_key: str, correction: str, universe_name: str = ""):
     """Saves user-confirmed lore facts and corrections permanently in SQLite."""
@@ -736,26 +808,28 @@ def generate_local_llama_content_sync(
     endpoint: str = "http://127.0.0.1:11435/v1",
     vision_endpoint: str = "http://127.0.0.1:11435/v1",
     text_model: str = "",
-    vision_model: str = ""
+    deep_model: str = "",
+    vision_model: str = "",
+    mode: str = "fast"
 ) -> str:
-    """Dispatches text or vision requests to local Ollama or Llama.cpp server via OpenAI-compatible API."""
+    """Dispatches text or vision requests to local Ollama server with 3-tier routing:
+    - Vision Tier: For queries containing photos / images (Qwen2.5-VL-7B)
+    - Deep Lore Tier: For deep analysis / research / contradiction audits (Qwen3.8-27B)
+    - Fast Chat Tier: For roleplay / casual lore chatter / DM banter (Qwen2.5-Coder-7B)
+    """
     import httpx
     text_prompt, images = extract_text_and_images_from_contents(contents)
     
     target_base = vision_endpoint if (images and vision_endpoint) else endpoint
     target_url = target_base.rstrip("/") + "/chat/completions"
 
-    # Auto-resolve model for Ollama if not specified
-    selected_model = (vision_model if images else text_model).strip()
-    if not selected_model:
-        installed = get_ollama_installed_models(target_base)
-        if installed:
-            if images:
-                selected_model = next((m for m in installed if any(k in m.lower() for k in ("vl", "vision", "caption", "llava"))), installed[0])
-            else:
-                selected_model = next((m for m in installed if not any(k in m.lower() for k in ("vl", "caption"))), installed[0])
-        else:
-            selected_model = "mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0" if images else "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    # 3-Tier Model Resolution
+    if images:
+        selected_model = (vision_model or os.environ.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0")).strip()
+    elif mode == "deep":
+        selected_model = (deep_model or os.environ.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")).strip()
+    else:
+        selected_model = (text_model or os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0")).strip()
 
     messages = []
     if system_instruction:
@@ -780,19 +854,28 @@ def generate_local_llama_content_sync(
         "stream": False
     }
 
-    print(f"🖥️ [Local Inference] Dispatching to '{selected_model}' at {target_url}...")
-    with httpx.Client(timeout=240.0) as client:
-        resp = client.post(target_url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    try:
+        with httpx.Client(timeout=180.0) as client:
+            resp = client.post(target_url, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                choices = data.get("choices", [])
+                if choices and "message" in choices[0]:
+                    ans = choices[0]["message"].get("content", "").strip()
+                    if ans:
+                        return ans
+            print(f"⚠️ Local LLM HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"⚠️ Local LLM connection failed ({target_url}): {e}")
 
+    return ""
 
 def generate_gemini_content_sync(
     contents: Any,
     system_instruction: str = "",
     temperature: float = 0.1,
-    user_id: Optional[Union[str, int]] = None
+    user_id: Optional[Union[str, int]] = None,
+    mode: str = "fast"
 ) -> str:
     """Generates content via Local Ollama/Llama.cpp (if enabled) or Gemini Cloud with automatic tier fallback."""
     # 1. Check if user has local Ollama / Llama.cpp mode enabled
@@ -806,7 +889,9 @@ def generate_gemini_content_sync(
                 endpoint=cfg["endpoint"],
                 vision_endpoint=cfg["vision_endpoint"],
                 text_model=cfg["text_model"],
-                vision_model=cfg["vision_model"]
+                deep_model=cfg.get("deep_model", ""),
+                vision_model=cfg["vision_model"],
+                mode=mode
             )
             if local_ans:
                 print(f"✅ Local model successfully generated response.")
@@ -2938,19 +3023,21 @@ async def flush_lore_slash(interaction: discord.Interaction, universe: str = Non
 
 
 # 11d. /setlocal Slash Command (Toggle Local Ollama / Llama.cpp Mode)
-@bot.tree.command(name="setlocal", description="Toggle local Ollama / Llama.cpp model inference vs Google Gemini Cloud")
+@bot.tree.command(name="setlocal", description="Toggle local Ollama 3-tier models (7B Fast / 27B Deep / 7B Vision) vs Gemini Cloud")
 @app_commands.user_install()
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(
-    enabled="True to route requests to local Ollama/Llama.cpp server; False to use Google Gemini Cloud",
-    text_model="Optional: Model tag for text (e.g. qwen3.8-27b or JonathanColetti/Qwen3.8-27B-Uncensored-GGUF)",
-    vision_model="Optional: Model tag for images (e.g. mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0)",
-    endpoint="Optional: Custom endpoint (default: http://127.0.0.1:11435/v1 for Ollama)"
+    enabled="True to route requests locally to Ollama; False to use Google Gemini Cloud",
+    chat_model="Fast model for chat/roleplay (default: hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0)",
+    deep_model="Deep reasoning model for lore/dossiers (default: hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M)",
+    vision_model="Vision model for photos (default: hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0)",
+    endpoint="Custom endpoint (default: http://127.0.0.1:11435/v1)"
 )
 async def set_local_slash(
     interaction: discord.Interaction,
     enabled: bool,
-    text_model: str = None,
+    chat_model: str = None,
+    deep_model: str = None,
     vision_model: str = None,
     endpoint: str = None
 ):
@@ -2968,48 +3055,28 @@ async def set_local_slash(
             enabled=enabled,
             endpoint=clean_ep,
             vision_endpoint=clean_ep,
-            text_model=text_model.strip() if text_model else None,
+            text_model=chat_model.strip() if chat_model else None,
+            deep_model=deep_model.strip() if deep_model else None,
             vision_model=vision_model.strip() if vision_model else None
         )
         cfg = get_user_local_config(interaction.user.id)
         if enabled:
-            tm_str = cfg['text_model'] or 'Auto-Detect / Default'
-            vm_str = cfg['vision_model'] or 'Auto-Detect / Default'
             msg = (
-                f"## 🖥️ Local Model Inference Mode: **ENABLED (Ollama / Llama.cpp)**\n\n"
+                f"## 🖥️ Local 3-Tier AI System: **ENABLED (Ollama)**\n\n"
                 f"• **Endpoint:** `{cfg['endpoint']}`\n"
-                f"• **Text Lore Model:** `{tm_str}`\n"
-                f"• **Vision Model (Images):** `{vm_str}`\n"
+                f"• **⚡ Fast Chat & Roleplay (7B):** `{cfg['text_model']}`\n"
+                f"• **🧠 Deep Lore & Analysis (27B):** `{cfg.get('deep_model', 'N/A')}`\n"
+                f"• **👁️ Vision & Photos (7B-VL):** `{cfg['vision_model']}`\n"
                 f"• **Cloud Fallback:** Automatic (Falls back to Gemini Cloud if Ollama is unreachable)\n\n"
-                f"⚡ *All future searches, lore queries, and DMs will now be processed 100% locally on your machine with zero API quota usage!*"
+                f"⚡ *Direct messages & casual banter will run at lightning speed on the 7B model. Use `/ask mode: Deep Lore (27B)` for deep research!*"
             )
         else:
-            msg = (
-                f"## ☁️ Cloud Model Inference Mode: **ACTIVE**\n\n"
-                f"• **Provider:** Google Gemini Cloud API\n"
-                f"• **Active Model Hierarchy:** `gemini-3.5-flash-lite` (500 RPD) $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.8-flash`\n\n"
-                f"✨ *Requests are now routed through Google Gemini Cloud.*"
-            )
+            msg = "## ☁️ Local Model Inference Mode: **DISABLED**\n\nAll requests are now routing to Google Gemini Cloud."
         await interaction.followup.send(msg, ephemeral=is_ephemeral)
     except Exception as e:
-        await interaction.followup.send(f"❌ Failed to update local mode setting: {str(e)}", ephemeral=is_ephemeral)
+        await interaction.followup.send(f"❌ Failed to set local mode: {e}", ephemeral=True)
 
 
-
-
-# 12. /ask Slash Command (Cross-Archive, Universe-Aware Semantic Search)
-@bot.tree.command(name="ask", description="Deep forensic search across all past messages in your DMs, channels, or Universes")
-@app_commands.user_install()
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@app_commands.describe(
-    query="What specific insight, character, link, quote, or details are you searching for?",
-    universe="Optional: Select a specific Universe to search across (defaults to active universe or global)",
-    target="Optional: Select a specific DM contact or channel to search (overrides universe filter)",
-    image="Optional: Primary image or reference art to analyze alongside query",
-    image_2="Optional: Second reference image / angle",
-    image_3="Optional: Third reference image / angle"
-)
-@app_commands.autocomplete(query=query_autocomplete, universe=universe_autocomplete, target=target_autocomplete)
 async def ask_anywhere(
     interaction: discord.Interaction,
     query: str,
@@ -3018,7 +3085,8 @@ async def ask_anywhere(
     image: discord.Attachment = None,
     image_2: discord.Attachment = None,
     image_3: discord.Attachment = None
-):
+,
+    mode: str = "fast"):
     is_ephemeral = await should_be_ephemeral(interaction)
     try:
         if not interaction.response.is_done():
@@ -3086,7 +3154,8 @@ async def ask_anywhere(
 
         final_answer = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id)
+            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id,
+            mode=mode)
         )
         if not final_answer:
             final_answer = "No response generated."
@@ -3115,6 +3184,366 @@ async def ask_anywhere(
 
 
 # 13. /character Slash Command (Multimodal Visual Appearance & Multi-Universe Registration)
+
+# ==========================================
+# Discord Interactive Settings View & Modal
+# ==========================================
+class SettingsEditModal(discord.ui.Modal, title="AskViolet AI Settings"):
+    def __init__(self, user_id: Union[str, int], current_cfg: Dict[str, str], view_ref: discord.ui.View):
+        super().__init__()
+        self.user_id = str(user_id)
+        self.view_ref = view_ref
+
+        self.input_chat = discord.ui.TextInput(
+            label="⚡ Stage 1: Fast Chat / Roleplay Model",
+            default=current_cfg.get("text_model", ""),
+            placeholder="e.g. qwen-coder-32k:latest or hf.co/bartowski/...",
+            required=False,
+            max_length=200
+        )
+        self.input_deep = discord.ui.TextInput(
+            label="🧠 Stage 2: Deep Lore / Dossier Model",
+            default=current_cfg.get("deep_model", ""),
+            placeholder="e.g. qwen3.8-16k:latest or hf.co/JonathanColetti/...",
+            required=False,
+            max_length=200
+        )
+        self.input_vision = discord.ui.TextInput(
+            label="👁️ Stage 3: Vision / Photo Model",
+            default=current_cfg.get("vision_model", ""),
+            placeholder="e.g. qwen-caption-32k:latest or hf.co/mradermacher/...",
+            required=False,
+            max_length=200
+        )
+        self.input_gemini = discord.ui.TextInput(
+            label="☁️ Cloud Gemini Model (Fallback)",
+            default=os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+            placeholder="e.g. gemini-3.5-flash-lite, gemini-3.8-flash",
+            required=False,
+            max_length=80
+        )
+        self.input_endpoint = discord.ui.TextInput(
+            label="🌐 Ollama Server Endpoint",
+            default=current_cfg.get("endpoint", "http://127.0.0.1:11435/v1"),
+            placeholder="e.g. http://127.0.0.1:11435/v1",
+            required=False,
+            max_length=120
+        )
+
+        self.add_item(self.input_chat)
+        self.add_item(self.input_deep)
+        self.add_item(self.input_vision)
+        self.add_item(self.input_gemini)
+        self.add_item(self.input_endpoint)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        ep = self.input_endpoint.value.strip() or "http://127.0.0.1:11435/v1"
+        chat_m = self.input_chat.value.strip()
+        deep_m = self.input_deep.value.strip()
+        vis_m = self.input_vision.value.strip()
+        gem_m = self.input_gemini.value.strip() or "gemini-3.5-flash-lite"
+
+        # Update SQLite
+        set_user_local_mode(
+            user_id=self.user_id,
+            enabled=is_user_local_mode_enabled(self.user_id),
+            endpoint=ep,
+            vision_endpoint=ep,
+            text_model=chat_m,
+            deep_model=deep_m,
+            vision_model=vis_m
+        )
+
+        # Sync to .env
+        if chat_m:
+            sync_setting_to_env("LOCAL_CHAT_MODEL", chat_m)
+            sync_setting_to_env("LOCAL_TEXT_MODEL", chat_m)
+        if deep_m:
+            sync_setting_to_env("LOCAL_DEEP_MODEL", deep_m)
+        if vis_m:
+            sync_setting_to_env("LOCAL_VISION_MODEL", vis_m)
+        if gem_m:
+            sync_setting_to_env("GEMINI_MODEL", gem_m)
+        if ep:
+            sync_setting_to_env("LOCAL_LLM_ENDPOINT", ep)
+            sync_setting_to_env("LOCAL_VISION_ENDPOINT", ep)
+
+        new_embed = build_settings_embed(self.user_id)
+        await interaction.response.edit_message(embed=new_embed, view=self.view_ref)
+
+
+def build_settings_embed(user_id: Union[str, int]) -> discord.Embed:
+    """Builds a formatted Discord embed showing all current settings."""
+    cfg = get_user_local_config(user_id)
+    is_local = is_user_local_mode_enabled(user_id)
+    gem_model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
+    status_str = "🟢 **ENABLED** (Ollama Local Hardware)" if is_local else "⚪ **DISABLED** (Google Gemini Cloud)"
+
+    embed = discord.Embed(
+        title="⚙️ AskViolet Model & Hardware Settings",
+        description=f"""Configure your 3-tier local hardware models, Gemini cloud fallbacks, and endpoints.
+
+**Current Inference Mode:** {status_str}""",
+        color=0x9333ea
+    )
+
+    embed.add_field(
+        name="⚡ Stage 1: Fast Chat & Roleplay (7B)",
+        value=f"`{cfg.get('text_model') or 'Auto-Detect'}`\n*Runs 100% in VRAM for instant ~90 tok/s responses in DMs.*",
+        inline=False
+    )
+    embed.add_field(
+        name="🧠 Stage 2: Deep Lore & Reasoning (27B)",
+        value=f"`{cfg.get('deep_model') or 'Auto-Detect'}`\n*Used for `/ask mode: deep` and multi-universe contradiction checks.*",
+        inline=False
+    )
+    embed.add_field(
+        name="👁️ Stage 3: Vision & OCR (7B-VL)",
+        value=f"`{cfg.get('vision_model') or 'Auto-Detect'}`\n*Triggered automatically whenever an image or photo is attached.*",
+        inline=False
+    )
+    embed.add_field(
+        name="☁️ Cloud Gemini Fallback",
+        value=f"`{gem_model}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🌐 Ollama Endpoint",
+        value=f"`{cfg.get('endpoint', 'http://127.0.0.1:11435/v1')}`",
+        inline=True
+    )
+    embed.set_footer(text="Settings sync instantly across SQLite, .env, and the desktop GUI.")
+    return embed
+
+
+class SettingsDashboardView(discord.ui.View):
+    def __init__(self, user_id: Union[str, int]):
+        super().__init__(timeout=300)
+        self.user_id = str(user_id)
+        self.selected_stage = None
+        self._rebuild_components()
+
+    def _rebuild_components(self):
+        self.clear_items()
+
+        # 1. Stage Selector Dropdown
+        stage_select = discord.ui.Select(
+            placeholder="Select a setting or stage to modify...",
+            min_values=1,
+            max_values=1,
+            row=0,
+            options=[
+                discord.SelectOption(label="🔀 Toggle Local Mode ON/OFF", value="toggle_local", description="Switch between local Ollama and Gemini Cloud"),
+                discord.SelectOption(label="⚡ Stage 1: Fast Chat Model (7B)", value="stage_chat", description="Configure model for DMs and roleplay"),
+                discord.SelectOption(label="🧠 Stage 2: Deep Lore Model (27B)", value="stage_deep", description="Configure model for deep lore research"),
+                discord.SelectOption(label="👁️ Stage 3: Vision Model (7B-VL)", value="stage_vision", description="Configure model for image inspection"),
+                discord.SelectOption(label="☁️ Cloud Gemini Model", value="stage_gemini", description="Configure Google Gemini cloud model"),
+            ]
+        )
+        stage_select.callback = self.on_stage_select
+        self.add_item(stage_select)
+
+        # 2. If a local stage was picked, populate a second dropdown with actual installed Ollama models!
+        if self.selected_stage in ("stage_chat", "stage_deep", "stage_vision"):
+            installed = get_ollama_installed_models()
+            model_options = []
+            for m in installed[:24]:  # Discord select limit is 25
+                model_options.append(discord.SelectOption(label=m[:100], value=m[:100]))
+            
+            if model_options:
+                stage_name = {
+                    "stage_chat": "Fast Chat",
+                    "stage_deep": "Deep Lore",
+                    "stage_vision": "Vision"
+                }[self.selected_stage]
+                model_select = discord.ui.Select(
+                    placeholder=f"Choose installed Ollama model for {stage_name}...",
+                    min_values=1,
+                    max_values=1,
+                    row=1,
+                    options=model_options
+                )
+                model_select.callback = self.on_model_pick
+                self.add_item(model_select)
+
+        # 3. If Gemini cloud was picked, populate Gemini model choices
+        elif self.selected_stage == "stage_gemini":
+            gem_options = [
+                discord.SelectOption(label="gemini-3.5-flash-lite", value="gemini-3.5-flash-lite", description="High quota (500 RPD) - Recommended"),
+                discord.SelectOption(label="gemini-3.1-flash-lite", value="gemini-3.1-flash-lite", description="Fast lite model (500 RPD)"),
+                discord.SelectOption(label="gemini-3.8-flash", value="gemini-3.8-flash", description="Standard Gemini 3.8 Flash"),
+                discord.SelectOption(label="gemini-3.6-flash", value="gemini-3.6-flash", description="Gemini 3.6 Flash"),
+                discord.SelectOption(label="gemini-3-flash", value="gemini-3-flash", description="Base Gemini 3 Flash"),
+                discord.SelectOption(label="gemini-2.5-flash", value="gemini-2.5-flash", description="Gemini 2.5 Flash"),
+            ]
+            gem_select = discord.ui.Select(
+                placeholder="Choose Google Gemini Cloud model...",
+                min_values=1,
+                max_values=1,
+                row=1,
+                options=gem_options
+            )
+            gem_select.callback = self.on_gemini_pick
+            self.add_item(gem_select)
+
+        # 4. Action Buttons (Modal Form Edit & Refresh)
+        btn_modal = discord.ui.Button(label="📝 Edit Form (Modal)", style=discord.ButtonStyle.primary, row=2)
+        btn_modal.callback = self.on_modal_click
+        self.add_item(btn_modal)
+
+        btn_refresh = discord.ui.Button(label="🔄 Refresh Models", style=discord.ButtonStyle.secondary, row=2)
+        btn_refresh.callback = self.on_refresh_click
+        self.add_item(btn_refresh)
+
+    async def on_stage_select(self, interaction: discord.Interaction):
+        val = interaction.data["values"][0]
+        if val == "toggle_local":
+            curr = is_user_local_mode_enabled(self.user_id)
+            set_user_local_mode(self.user_id, enabled=not curr)
+            sync_setting_to_env("LOCAL_LLM_ENABLED", "true" if not curr else "false")
+            self.selected_stage = None
+            self._rebuild_components()
+            await interaction.response.edit_message(embed=build_settings_embed(self.user_id), view=self)
+        else:
+            self.selected_stage = val
+            self._rebuild_components()
+            await interaction.response.edit_message(embed=build_settings_embed(self.user_id), view=self)
+
+    async def on_model_pick(self, interaction: discord.Interaction):
+        picked_model = interaction.data["values"][0]
+        cfg = get_user_local_config(self.user_id)
+
+        chat_m = cfg.get("text_model", "")
+        deep_m = cfg.get("deep_model", "")
+        vis_m = cfg.get("vision_model", "")
+
+        if self.selected_stage == "stage_chat":
+            chat_m = picked_model
+            sync_setting_to_env("LOCAL_CHAT_MODEL", chat_m)
+            sync_setting_to_env("LOCAL_TEXT_MODEL", chat_m)
+        elif self.selected_stage == "stage_deep":
+            deep_m = picked_model
+            sync_setting_to_env("LOCAL_DEEP_MODEL", deep_m)
+        elif self.selected_stage == "stage_vision":
+            vis_m = picked_model
+            sync_setting_to_env("LOCAL_VISION_MODEL", vis_m)
+
+        set_user_local_mode(
+            user_id=self.user_id,
+            enabled=is_user_local_mode_enabled(self.user_id),
+            text_model=chat_m,
+            deep_model=deep_m,
+            vision_model=vis_m
+        )
+
+        self.selected_stage = None
+        self._rebuild_components()
+        await interaction.response.edit_message(embed=build_settings_embed(self.user_id), view=self)
+
+    async def on_gemini_pick(self, interaction: discord.Interaction):
+        picked_model = interaction.data["values"][0]
+        sync_setting_to_env("GEMINI_MODEL", picked_model)
+        self.selected_stage = None
+        self._rebuild_components()
+        await interaction.response.edit_message(embed=build_settings_embed(self.user_id), view=self)
+
+    async def on_modal_click(self, interaction: discord.Interaction):
+        cfg = get_user_local_config(self.user_id)
+        modal = SettingsEditModal(self.user_id, cfg, self)
+        await interaction.response.send_modal(modal)
+
+    async def on_refresh_click(self, interaction: discord.Interaction):
+        self._rebuild_components()
+        await interaction.response.edit_message(embed=build_settings_embed(self.user_id), view=self)
+
+
+# ==========================================
+# /settings Unified Slash Command
+# ==========================================
+@bot.tree.command(name="settings", description="Interactive dashboard, dropdowns, and forms to configure local & cloud AI models")
+@app_commands.user_install()
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    setting="Optional: Quick update a specific setting directly",
+    value="Optional: The new value to set"
+)
+@app_commands.choices(setting=[
+    app_commands.Choice(name="🔀 Toggle Local Mode (true/false)", value="local_mode"),
+    app_commands.Choice(name="⚡ Stage 1: Fast Chat Model (7B)", value="fast_chat_model"),
+    app_commands.Choice(name="🧠 Stage 2: Deep Lore Model (27B)", value="deep_lore_model"),
+    app_commands.Choice(name="👁️ Stage 3: Vision Model (7B-VL)", value="vision_model"),
+    app_commands.Choice(name="☁️ Cloud Gemini Model", value="gemini_model"),
+    app_commands.Choice(name="🌐 Ollama Endpoint", value="endpoint"),
+])
+async def settings_slash(
+    interaction: discord.Interaction,
+    setting: app_commands.Choice[str] = None,
+    value: str = None
+):
+    is_ephemeral = await should_be_ephemeral(interaction)
+    user_id = str(interaction.user.id)
+
+    # Case 1: Direct command-line update (/settings setting: ... value: ...)
+    if setting and value:
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=is_ephemeral)
+        except Exception:
+            pass
+
+        key = setting.value
+        val = value.strip()
+        cfg = get_user_local_config(user_id)
+
+        chat_m = cfg.get("text_model", "")
+        deep_m = cfg.get("deep_model", "")
+        vis_m = cfg.get("vision_model", "")
+        ep = cfg.get("endpoint", "http://127.0.0.1:11435/v1")
+        is_local = is_user_local_mode_enabled(user_id)
+
+        if key == "local_mode":
+            is_local = val.lower() in ("true", "1", "yes", "on", "enable", "enabled")
+            sync_setting_to_env("LOCAL_LLM_ENABLED", "true" if is_local else "false")
+        elif key == "fast_chat_model":
+            chat_m = val
+            sync_setting_to_env("LOCAL_CHAT_MODEL", val)
+            sync_setting_to_env("LOCAL_TEXT_MODEL", val)
+        elif key == "deep_lore_model":
+            deep_m = val
+            sync_setting_to_env("LOCAL_DEEP_MODEL", val)
+        elif key == "vision_model":
+            vis_m = val
+            sync_setting_to_env("LOCAL_VISION_MODEL", val)
+        elif key == "gemini_model":
+            sync_setting_to_env("GEMINI_MODEL", val)
+        elif key == "endpoint":
+            ep = val
+            sync_setting_to_env("LOCAL_LLM_ENDPOINT", val)
+            sync_setting_to_env("LOCAL_VISION_ENDPOINT", val)
+
+        set_user_local_mode(
+            user_id=user_id,
+            enabled=is_local,
+            endpoint=ep,
+            vision_endpoint=ep,
+            text_model=chat_m,
+            deep_model=deep_m,
+            vision_model=vis_m
+        )
+
+        embed = build_settings_embed(user_id)
+        view = SettingsDashboardView(user_id)
+        await interaction.followup.send(f"✅ Setting `{setting.name}` updated to `{val}`!", embed=embed, view=view, ephemeral=is_ephemeral)
+        return
+
+    # Case 2: Interactive UI Dashboard with Dropdowns & Modal Forms
+    embed = build_settings_embed(user_id)
+    view = SettingsDashboardView(user_id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=is_ephemeral)
+
+
+
 @bot.tree.command(name="character", description="Upload multiple character art/images to analyze and register visual appearance by Universe")
 @app_commands.user_install()
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)

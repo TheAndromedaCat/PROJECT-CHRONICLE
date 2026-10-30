@@ -102,3 +102,23 @@ python lore_manager.py
 
 
 
+
+
+## 🖥️ 3-Tier Local AI Hardware System (RTX 3060 12GB + DDR5)
+
+AskViolet now supports intelligent 3-tier local hardware routing via Ollama (http://127.0.0.1:11435):
+
+1. **⚡ Fast Chat & Roleplay Tier (7B)**:
+   - Model: hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF:Q8_0
+   - VRAM: ~8.1 GB (100% in VRAM)
+   - Performance: ~85–100 tokens/sec instant generation for casual DM chatter, roleplaying, and quick lore queries.
+
+2. **🧠 Deep Lore & Dossier Tier (27B)**:
+   - Model: hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M
+   - VRAM + DDR5: ~16.8 GB (Partial VRAM offload + DDR5 6400 MT/s)
+   - Performance: ~14–18 tokens/sec deep analytical reasoning for multi-universe lore searches and contradiction audits. Trigger via /ask mode: deep.
+
+3. **👁️ Multimodal Vision Tier (7B-VL)**:
+   - Model: hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0
+   - VRAM: ~8.1 GB (100% in VRAM)
+   - Performance: Triggered automatically whenever an image or photo is attached to /ask or DMs.
