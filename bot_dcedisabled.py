@@ -537,9 +537,9 @@ def get_user_local_config(user_id: Optional[Union[str, int]] = None) -> Dict[str
     default_cfg = {
         "endpoint": os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:11435/v1"),
         "vision_endpoint": os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:11435/v1"),
-        "text_model": os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hermes3:8b"),
-        "deep_model": os.environ.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"),
-        "vision_model": os.environ.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0")
+        "text_model": os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hermes3-32k:latest"),
+        "deep_model": os.environ.get("LOCAL_DEEP_MODEL", "qwen3.8-256k:latest"),
+        "vision_model": os.environ.get("LOCAL_VISION_MODEL", "qwen-caption-32k:latest")
     }
     if user_id:
         try:
@@ -823,13 +823,31 @@ def generate_local_llama_content_sync(
     target_base = vision_endpoint if (images and vision_endpoint) else endpoint
     target_url = target_base.rstrip("/") + "/chat/completions"
 
-    # 3-Tier Model Resolution
+    # 3-Tier Model Resolution with Custom PC Priority & Portable Fallbacks
     if images:
-        selected_model = (vision_model or os.environ.get("LOCAL_VISION_MODEL", "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0")).strip()
+        selected_model = (vision_model or os.environ.get("LOCAL_VISION_MODEL") or "qwen-caption-32k:latest").strip()
     elif mode == "deep":
-        selected_model = (deep_model or os.environ.get("LOCAL_DEEP_MODEL", "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")).strip()
+        selected_model = (deep_model or os.environ.get("LOCAL_DEEP_MODEL") or "qwen3.8-256k:latest").strip()
     else:
-        selected_model = (text_model or os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL", "hermes3:8b")).strip()
+        selected_model = (text_model or os.environ.get("LOCAL_CHAT_MODEL") or os.environ.get("LOCAL_TEXT_MODEL") or "hermes3-32k:latest").strip()
+
+    # Portable Fallback: If running on another machine where custom local modelfiles don't exist yet,
+    # automatically fallback to the public Hugging Face tags or base models without failing!
+    installed = get_ollama_installed_models(target_base)
+    if installed:
+        is_available = any(
+            selected_model.lower() == m.lower() or
+            f"{selected_model}:latest".lower() == m.lower() or
+            selected_model.lower().removesuffix(":latest") == m.lower().removesuffix(":latest")
+            for m in installed
+        )
+        if not is_available:
+            if images:
+                selected_model = next((m for m in installed if any(k in m.lower() for k in ("caption", "vl", "vision"))), "hf.co/mradermacher/Qwen2.5-VL-7B-Abliterated-Caption-it-GGUF:Q8_0")
+            elif mode == "deep":
+                selected_model = next((m for m in installed if any(k in m.lower() for k in ("qwen3.8", "27b", "uncensored"))), "hf.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
+            else:
+                selected_model = next((m for m in installed if any(k in m.lower() for k in ("hermes", "chat", "coder"))), "hermes3:8b")
 
     messages = []
     if system_instruction:
@@ -1635,6 +1653,29 @@ def search_archive_messages(
 # 5. Build Discord Client Architecture
 dm_conversation_history: Dict[int, List[Dict[str, str]]] = {}
 
+def get_persistent_dm_history(limit: int = 8) -> List[Dict[str, str]]:
+    """Loads recent DM conversation turns from SQLite so bot restarts preserve memory."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            SELECT query, response FROM query_history 
+            WHERE channel_id = 'dm_global' OR query LIKE '[DM] %'
+            ORDER BY id DESC LIMIT ?
+        """, (limit,))
+        rows = c.fetchall()
+        conn.close()
+        history = []
+        for q, r in reversed(rows):
+            clean_q = q.removeprefix("[DM] ").strip()
+            history.append({"role": "user", "content": clean_q})
+            history.append({"role": "assistant", "content": r})
+        return history
+    except Exception as e:
+        print(f"⚠️ Error loading persistent DM history: {e}")
+        return []
+
+
 
 async def send_dm_chunks(
     channel: discord.abc.Messageable,
@@ -1775,21 +1816,52 @@ class AntigravitySearchBot(commands.Bot):
                         except Exception as e:
                             print(f"⚠️ Could not auto-sync lore entry: {e}")
 
-                    # Fetch conversational memory for this user DM
+                    # Fetch conversational memory for this user DM (fallback to SQLite if empty after bot restart)
                     conv_history = dm_conversation_history.setdefault(user_id, [])
+                    if not conv_history:
+                        db_past = get_persistent_dm_history(limit=6)
+                        if db_past:
+                            conv_history.extend(db_past)
+                            print(f"💾 Loaded {len(db_past)} prior conversation turns from SQLite for @{message.author.name}")
+
                     conv_history.append({"role": "user", "content": content})
-                    if len(conv_history) > 12:
-                        dm_conversation_history[user_id] = conv_history[-12:]
+                    if len(conv_history) > 16:
+                        dm_conversation_history[user_id] = conv_history[-16:]
 
                     recent_turns = "\n".join(
                         f"{'User' if turn['role'] == 'user' else 'Violet'}: {turn['content']}"
                         for turn in conv_history[-6:]
                     )
 
-                    # Search focused on current question (with fallback to recent turns if query is generic)
-                    search_terms = extract_search_terms(content)
-                    search_text = content if search_terms else (content + " " + recent_turns)
-                    
+                    # Intelligent Context Threading: Check if user is confirming or agreeing to Violet's previous query
+                    content_clean = re.sub(r'[^a-zA-Z0-9 ]', '', content.lower()).strip()
+                    affirmations = {
+                        "sure", "yes", "yeah", "yep", "sure lets do that", "lets do that", "let do that",
+                        "do that", "ok", "okay", "tell me", "tell me more", "both", "all of them", "first one",
+                        "second one", "the first one", "the second one", "go ahead", "sounds good", "continue",
+                        "please do", "what happened next", "explain that", "expand on that", "do both", "lets go"
+                    }
+                    is_affirmation = content_clean in affirmations or any(content_clean.startswith(a + " ") for a in ("sure", "yes", "yeah", "ok", "okay", "lets", "let", "sounds good")) or len(content_clean.split()) <= 4
+
+                    # If user is answering Violet's previous proposal, scan back for the last query
+                    prior_assistant_turn = ""
+                    for turn in reversed(conv_history[:-1]):
+                        if turn.get("role") == "assistant":
+                            prior_assistant_turn = turn.get("content", "")
+                            break
+
+                    if is_affirmation and prior_assistant_turn:
+                        # Extract the proposal from the previous turn
+                        query_match = re.search(r'(?:Master Archivist Query:?|would you like to|shall we|explore|examine)(.*?)(?:\n|$)', prior_assistant_turn, re.IGNORECASE)
+                        query_topic = query_match.group(1).strip() if query_match else prior_assistant_turn[-300:]
+                        # Clean query topic of formatting
+                        query_topic_clean = re.sub(r'[*_#?]', '', query_topic).strip()
+                        search_text = f"{query_topic_clean} {uni_filter or ''}".strip()
+                        print(f"🔗 [Context Threading]: User agreed ('{content}'). Searching archive for proposal: '{search_text[:90]}...'")
+                    else:
+                        search_terms = extract_search_terms(content)
+                        search_text = content if (search_terms and len(content.split()) > 3) else (content + " " + recent_turns)
+
                     formatted_history_lines, matched_count, total_count, scope_desc = search_archive_messages(
                         query=search_text,
                         channel_id=None,
@@ -1800,15 +1872,19 @@ class AntigravitySearchBot(commands.Bot):
 
                     # Intelligent 3-Tier Model Weaving for DMs:
                     # - If images present -> Vision Tier (7B-VL)
-                    # - If discussing canon, territory, clans, history, or lore synthesis -> Deep Lore Tier (27B)
-                    # - If casual chat, roleplay, or general conversational banter -> Fast Chat Tier (Hermes 3 8B)
+                    # - If discussing canon, territory, clans, history, or continuing an archive query -> Deep Lore Tier (27B)
+                    # - If purely casual non-lore chatter -> Fast Chat Tier (Hermes 3 8B)
                     lore_heavy_keywords = [
                         "clan", "territory", "border", "poison", "medicine", "leader", "deputy", "canon",
                         "lore", "universe", "timeline", "history", "archive", "ledger", "incident", "vial",
                         "generation", "lineage", "ancestor", "daughter", "son", "father", "mother", "sunset",
-                        "hawkheart", "rosekit", "meadowsong", "earthclan", "frostclan", "nightclan", "valley"
+                        "hawkheart", "rosekit", "meadowsong", "earthclan", "frostclan", "nightclan", "valley",
+                        "kali", "evangel", "archie", "nixxi", "eliza", "sunflower", "carra"
                     ]
-                    is_deep_lore_query = any(k in content_lower for k in lore_heavy_keywords) or len(content) > 100
+                    # Retain Deep model if current message, affirmation, or recent turns mention lore
+                    has_lore_keywords = any(k in content_lower for k in lore_heavy_keywords)
+                    has_prior_lore = any(k in prior_assistant_turn.lower() for k in lore_heavy_keywords)
+                    is_deep_lore_query = has_lore_keywords or (is_affirmation and has_prior_lore) or (uni_filter is not None)
                     dm_inference_mode = "deep" if is_deep_lore_query else "fast"
 
                     system_instruction = build_system_instruction(channel_id=None, universe_name=uni_filter) + (
@@ -1816,7 +1892,13 @@ class AntigravitySearchBot(commands.Bot):
                         "You are chatting directly with the user (your creator and collaborator) in a private Discord DM.\n"
                         "You are Violet: brilliant, witty, highly analytical, and passionately invested in their original universes, clans, and character storylines.\n\n"
                         "CRITICAL DIRECTIVES:\n"
-                        "1. ABSOLUTELY ZERO CORPORATE SYCOPHANCY OR ASSISTANT FILLER:\n"
+                        "1. NEVER HALLUCINATE ROLEPLAY HUBS OR MULTI-USER DMS:\n"
+                        "   You are NOT a tabletop roleplay bot or a fictional character seeking a scene to play. "
+                        "   NEVER say 'I\'ll go ahead and join the DMs with the other participants', 'feel free to set the scene', or 'let me know what characters or NPCs to introduce'. "
+                        "   You are Violet, the Master Forensic Archivist. You examine REAL chat logs and established world canon. "
+                        "   When you propose a Master Archivist Query and the user confirms ('Sure lets do that', 'Yes', 'Tell me'), "
+                        "   IMMEDIATELY execute the query! Present the archival logs, explain the character fates, cite quotes, and codify the lore.\n\n"
+                        "2. ABSOLUTELY ZERO CORPORATE SYCOPHANCY OR ASSISTANT FILLER:\n"
                         "   NEVER utter generic chatbot platitudes such as:\n"
                         "   - 'If you have any other questions or need further assistance, feel free to ask!'\n"
                         "   - 'I hope this information was helpful!'\n"
