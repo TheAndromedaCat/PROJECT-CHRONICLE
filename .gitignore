@@ -42,3 +42,4 @@ insert_*.py
 dump_*.py
 make_*.py
 
+/lore

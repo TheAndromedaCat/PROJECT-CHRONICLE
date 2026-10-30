@@ -42,8 +42,8 @@ DISCORD_BOT_TOKEN=your_discord_bot_token_here
 # Google Gemini API Key (from Google AI Studio: https://aistudio.google.com/)
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# Gemini Model
-GEMINI_MODEL=gemini-3.8-flash
+# Gemini Model (Recommended: gemini-3.5-flash-lite for 500 requests/day quota)
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
 > **Credential Details:**
@@ -83,5 +83,20 @@ python bot_dcedisabled.py
 python universe_manager.py
 ```
 *(Opens a local visual dashboard at `http://localhost:5050` to search, filter, and assign channels/servers to universes).*
+
+### Launch Lore Archivist & Manager (No DCE required):
+```bash
+python lore_manager.py
+```
+*(Opens an interactive CLI to flush temporary DM conversations to Markdown files, enter new lore directly, or sync any `.md` notes from the `lore/` folder into the database).*
+
+* **Command-line shortcuts:**
+  * `python lore_manager.py --flush`: Flushes today's DM discussions directly into `lore/<Universe>/` dossiers and SQLite.
+  * `python lore_manager.py --sync`: Reads all markdown notes in `lore/` and syncs them into SQLite.
+
+### Discord Slash Commands for Lore Management:
+* **`/addlore topic: [title] content: [details] universe: [Universe]`**: Record new lore directly from Discord without DCE.
+* **`/flushlore universe: [Universe]`**: Flush recent DM discussions into permanent Markdown files and SQLite.
+
 
 

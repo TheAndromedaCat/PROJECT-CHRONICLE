@@ -19,6 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+import lore_manager
 from google import genai
 from google.genai import types
 
@@ -28,7 +29,7 @@ load_dotenv()
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DISCORD_USER_TOKEN = None  # Permanently disabled for account safety
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 BASE_DIR = Path(__file__).resolve().parent
 DCE_PATH = ""  # DCE disabled for account safety
 
@@ -132,6 +133,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_active_universe (
             user_id TEXT PRIMARY KEY,
             active_universe TEXT COLLATE NOCASE,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_local_mode (
+            user_id TEXT PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            endpoint TEXT DEFAULT 'http://127.0.0.1:8080/v1',
+            vision_endpoint TEXT DEFAULT 'http://127.0.0.1:8081/v1',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -429,6 +439,59 @@ def get_last_query_and_response(channel_id: str) -> Tuple[Optional[str], Optiona
         return (None, None)
 
 
+# --- Local Llama.cpp Mode Storage & Configuration ---
+def is_user_local_mode_enabled(user_id: Optional[Union[str, int]] = None) -> bool:
+    """Checks whether local Llama.cpp inference mode is enabled for this user or globally."""
+    if user_id:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT enabled FROM user_local_mode WHERE user_id = ?", (str(user_id),))
+            row = c.fetchone()
+            conn.close()
+            if row is not None:
+                return bool(row[0])
+        except Exception:
+            pass
+    return os.environ.get("LOCAL_LLM_ENABLED", "false").lower() in ("true", "1", "yes")
+
+
+def set_user_local_mode(user_id: Union[str, int], enabled: bool, endpoint: Optional[str] = None, vision_endpoint: Optional[str] = None):
+    """Sets local Llama.cpp inference preference and endpoints for a user in SQLite."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO user_local_mode (user_id, enabled, endpoint, vision_endpoint, updated_at)
+        VALUES (?, ?, COALESCE(?, 'http://127.0.0.1:8080/v1'), COALESCE(?, 'http://127.0.0.1:8081/v1'), CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            enabled = excluded.enabled,
+            endpoint = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.endpoint END,
+            vision_endpoint = CASE WHEN ? IS NOT NULL THEN ? ELSE user_local_mode.vision_endpoint END,
+            updated_at = CURRENT_TIMESTAMP
+    """, (str(user_id), 1 if enabled else 0, endpoint, vision_endpoint, endpoint, endpoint, vision_endpoint, vision_endpoint))
+    conn.commit()
+    conn.close()
+
+
+def get_user_local_endpoints(user_id: Optional[Union[str, int]] = None) -> Tuple[str, str]:
+    """Returns (endpoint, vision_endpoint) for Llama.cpp servers."""
+    default_ep = os.environ.get("LOCAL_LLM_ENDPOINT", "http://127.0.0.1:8080/v1")
+    default_vip = os.environ.get("LOCAL_VISION_ENDPOINT", "http://127.0.0.1:8081/v1")
+    if user_id:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT endpoint, vision_endpoint FROM user_local_mode WHERE user_id = ?", (str(user_id),))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                return row[0] or default_ep, row[1] or default_vip
+        except Exception:
+            pass
+    return default_ep, default_vip
+
+
+
 def save_lore_override(channel_id: str, target_name: str, topic_key: str, correction: str, universe_name: str = ""):
     """Saves user-confirmed lore facts and corrections permanently in SQLite."""
     if not correction:
@@ -520,13 +583,18 @@ def build_system_instruction(channel_id: Optional[str] = None, universe_name: Op
 import time
 
 MODEL_TIER_HIERARCHY = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3-flash",
+    "gemini-3.0-flash",
+    "gemini-3.1-pro",
+    "gemini-4-argon",
     "gemini-flash-latest",
     "gemini-flash-lite-latest",
-    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 _model_cooldowns: Dict[str, Tuple[float, str]] = {}  # {model_name: (available_at_timestamp, reason_str)}
@@ -535,7 +603,7 @@ _model_cooldowns: Dict[str, Tuple[float, str]] = {}  # {model_name: (available_a
 def get_active_model_pool() -> List[str]:
     """Returns candidate models sorted by priority with active (non-cooldown) models first."""
     now = time.time()
-    primary = (os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash").strip()
+    primary = (os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     candidates = [primary] + [m for m in MODEL_TIER_HIERARCHY if m != primary]
     
     available = []
@@ -554,12 +622,19 @@ def get_active_model_pool() -> List[str]:
     return available + cooling_down
 
 
-def get_model_pool_status() -> List[str]:
+def get_model_pool_status(user_id: Optional[Union[str, int]] = None) -> List[str]:
     """Returns formatted list of AI models in the tier hierarchy and their live status."""
     now = time.time()
-    primary = (os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash").strip()
     status_list = []
     
+    # 1. Local Mode indicator
+    if is_user_local_mode_enabled(user_id):
+        endpoint, vision_endpoint = get_user_local_endpoints(user_id)
+        status_list.append(f"🖥️ **Local Llama.cpp Mode:** 🟢 **ACTIVE** (Text: `{endpoint}` | Vision: `{vision_endpoint}`)")
+    else:
+        status_list.append(f"🖥️ **Local Llama.cpp Mode:** ⚪ Disabled (Use `/setlocal enabled: True` to switch)")
+
+    primary = (os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     seen = set()
     candidates = [primary] + [m for m in MODEL_TIER_HIERARCHY if m != primary]
     for idx, m in enumerate(candidates):
@@ -581,8 +656,101 @@ def get_model_pool_status() -> List[str]:
     return status_list
 
 
-def generate_gemini_content_sync(contents: Any, system_instruction: str = "", temperature: float = 0.1) -> str:
-    """Generates content via Gemini with automatic fallback across model tiers based on available RPM/TPM/RPD. Supports multimodal inputs."""
+def extract_text_and_images_from_contents(contents: Any) -> Tuple[str, List[Tuple[str, str]]]:
+    """Converts multimodal input into text prompt and list of (mime_type, base64_str)."""
+    import base64
+    if isinstance(contents, str):
+        return contents, []
+    
+    text_parts = []
+    images = []
+    if isinstance(contents, list):
+        for item in contents:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif hasattr(item, "inline_data") and item.inline_data:
+                b64 = base64.b64encode(item.inline_data.data).decode("utf-8")
+                mime = item.inline_data.mime_type or "image/png"
+                images.append((mime, b64))
+            elif hasattr(item, "data") and hasattr(item, "mime_type"):
+                b64 = base64.b64encode(item.data).decode("utf-8")
+                images.append((item.mime_type or "image/png", b64))
+            elif isinstance(item, dict) and "data" in item:
+                images.append((item.get("mime_type", "image/png"), item["data"]))
+    return "\n\n".join(text_parts).strip(), images
+
+
+def generate_local_llama_content_sync(
+    contents: Any,
+    system_instruction: str = "",
+    temperature: float = 0.2,
+    endpoint: str = "http://127.0.0.1:8080/v1",
+    vision_endpoint: str = "http://127.0.0.1:8081/v1"
+) -> str:
+    """Dispatches text or vision requests to local Llama.cpp / Qwen server via OpenAI-compatible API."""
+    import httpx
+    text_prompt, images = extract_text_and_images_from_contents(contents)
+    
+    # If images are present, route to vision endpoint (or endpoint if only one server is running)
+    target_base = vision_endpoint if (images and vision_endpoint) else endpoint
+    target_url = target_base.rstrip("/") + "/chat/completions"
+
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+
+    if images:
+        content_array = [{"type": "text", "text": text_prompt}]
+        for mime, b64 in images:
+            content_array.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"}
+            })
+        messages.append({"role": "user", "content": content_array})
+    else:
+        messages.append({"role": "user", "content": text_prompt})
+
+    payload = {
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": 4096,
+        "stream": False
+    }
+
+    # Connect with generous timeout for local models running on CPU/GPU
+    with httpx.Client(timeout=180.0) as client:
+        resp = client.post(target_url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
+def generate_gemini_content_sync(
+    contents: Any,
+    system_instruction: str = "",
+    temperature: float = 0.1,
+    user_id: Optional[Union[str, int]] = None
+) -> str:
+    """Generates content via Local Llama.cpp (if enabled) or Gemini Cloud with automatic tier fallback."""
+    # 1. Check if user has local Llama.cpp mode enabled
+    if is_user_local_mode_enabled(user_id):
+        endpoint, vision_endpoint = get_user_local_endpoints(user_id)
+        try:
+            print(f"🖥️ [Local Mode] Routing generation to Llama.cpp endpoint: {endpoint}...")
+            local_ans = generate_local_llama_content_sync(
+                contents=contents,
+                system_instruction=system_instruction,
+                temperature=temperature,
+                endpoint=endpoint,
+                vision_endpoint=vision_endpoint
+            )
+            if local_ans:
+                print(f"✅ Local Llama.cpp model successfully generated response.")
+                return local_ans
+        except Exception as e:
+            print(f"⚠️ [Local Mode Error] Could not connect to Llama.cpp ({e}). Falling back to Google Gemini Cloud...")
+
+    # 2. Cloud Gemini Model Pool Fallback
     model_pool = get_active_model_pool()
     now = time.time()
     last_err = None
@@ -612,21 +780,21 @@ def generate_gemini_content_sync(contents: Any, system_instruction: str = "", te
                 return response.text
         except Exception as e:
             last_err = e
-            err_str = str(e)
+            err_str = str(e).lower()
             
             # Categorize error & calculate cooldown
-            if "GenerateRequestsPerDay" in err_str or "free_tier_requests" in err_str or "limit: 20" in err_str:
+            if "generaterequestsperday" in err_str or "requests per day" in err_str or "perday" in err_str or ("quota" in err_str and "day" in err_str) or "free_tier_requests" in err_str or "limit: 20" in err_str:
                 # Daily request limit (RPD)
-                cooldown_seconds = 6 * 3600.0
+                cooldown_seconds = 4 * 3600.0
                 reason = "Daily RPD Limit"
-                print(f"🛑 [Model Router] '{model_name}' exceeded daily quota (RPD). Set cooldown for 6 hours.")
-            elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                print(f"🛑 [Model Router] '{model_name}' exceeded daily quota (RPD). Set cooldown for 4 hours.")
+            elif "429" in err_str or "resource_exhausted" in err_str or "rate" in err_str:
                 # Per-minute rate limit (RPM/TPM)
                 match = re.search(r"retry\s+(?:in\s+)?([\d\.]+)\s*s", err_str, re.IGNORECASE)
                 cooldown_seconds = (float(match.group(1)) + 2.0) if match else 60.0
                 reason = "RPM/TPM Rate Limit"
                 print(f"⚠️ [Model Router] '{model_name}' hit rate limit ({reason}). Set cooldown for {cooldown_seconds:.1f}s.")
-            elif "404" in err_str or "NOT_FOUND" in err_str:
+            elif "404" in err_str or "not_found" in err_str:
                 cooldown_seconds = 24 * 3600.0
                 reason = "Model Unavailable (404)"
                 print(f"⚠️ [Model Router] '{model_name}' not found / deprecated.")
@@ -1388,6 +1556,10 @@ class AntigravitySearchBot(commands.Bot):
 
     async def setup_hook(self):
         init_db()
+        try:
+            lore_manager.init_lore_infrastructure()
+        except Exception as e:
+            print(f"⚠️ Could not init lore infrastructure: {e}")
         print("🚀 Connected as AskViolet#8565. Syncing application commands...")
         try:
             synced = await self.tree.sync()
@@ -1430,16 +1602,27 @@ class AntigravitySearchBot(commands.Bot):
                     lore_triggers = [
                         "is actually", "supposed to be", "the lore is", "correction:", "in main universe",
                         "in aestiolgel", "fell into a black hole", "is canon", "remember that", "is not the same",
-                        "lore override", "lore fact", "canon fact"
+                        "lore override", "lore fact", "canon fact", "lock that in", "lock it in", "save this",
+                        "save to memory", "note:", "clan", "territory", "camp", "poisoning"
                     ]
                     content_lower = content.lower()
-                    if any(t in content_lower for t in lore_triggers) and len(content) > 20:
+                    if (any(t in content_lower for t in lore_triggers) or len(content) > 120) and len(content) > 25:
                         detected_uni = uni_filter or "Main Universe"
                         if "aestiolgel" in content_lower and "main universe" not in content_lower:
                             detected_uni = "Aestiolgel"
                         elif "main universe" in content_lower:
                             detected_uni = "Main Universe"
-                        save_lore_override("", "AskViolet", "DM Canon Lore", content, universe_name=detected_uni)
+                        first_words = " ".join(content.split()[:5])
+                        save_lore_override("", "AskViolet DM", f"Lore: {first_words}", content, universe_name=detected_uni)
+                        try:
+                            lore_manager.add_lore_entry(
+                                universe_name=detected_uni,
+                                topic_title=f"DM_{first_words}",
+                                content=content,
+                                author=message.author.name
+                            )
+                        except Exception as e:
+                            print(f"⚠️ Could not auto-sync lore entry: {e}")
 
                     # Fetch conversational memory for this user DM
                     conv_history = dm_conversation_history.setdefault(user_id, [])
@@ -2613,6 +2796,82 @@ async def view_lore(interaction: discord.Interaction, universe: str = None, targ
     except Exception as e:
         print(f"❌ /lore error: {e}")
         await interaction.followup.send(f"❌ Error viewing lore: {str(e)}", ephemeral=is_ephemeral)
+
+
+# 11b. /addlore Slash Command (Directly save canonical lore without DCE)
+@bot.tree.command(name="addlore", description="Directly save canonical lore, character history, or world facts into the archive")
+@app_commands.user_install()
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    topic="Title of the topic (e.g. 'Valley Clan Territories' or 'Nightshade')",
+    content="The detailed lore description, backstory, or worldbuilding facts",
+    universe="Optional: Target universe (defaults to your active universe or Main Universe)"
+)
+@app_commands.autocomplete(universe=universe_autocomplete)
+async def add_lore_slash(interaction: discord.Interaction, topic: str, content: str, universe: str = None):
+    is_ephemeral = await should_be_ephemeral(interaction)
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=is_ephemeral)
+    except Exception:
+        pass
+
+    try:
+        active_uni = get_user_active_universe(interaction.user.id)
+        clean_uni = universe.strip() if universe and universe.lower() not in ("all", "global", "all universes") else (active_uni or "Main Universe")
+        file_path = lore_manager.add_lore_entry(
+            universe_name=clean_uni,
+            topic_title=topic,
+            content=content,
+            author=interaction.user.name
+        )
+        msg = (
+            f"## 📚 Canonical Lore Recorded & Locked In!\n\n"
+            f"• **Topic:** **`{topic}`**\n"
+            f"• **Universe:** **`{clean_uni}`**\n"
+            f"• **Dossier File:** `{file_path}`\n\n"
+            f"⚡ *This lore has been permanently committed to SQLite and exported to Markdown. Violet will use it as 100% authoritative ground truth in all searches without needing DCE.*"
+        )
+        await interaction.followup.send(msg, ephemeral=is_ephemeral)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to record lore: {str(e)}", ephemeral=is_ephemeral)
+
+
+# 11c. /flushlore Slash Command (Flush temporary DM discussions into permanent lore)
+@bot.tree.command(name="flushlore", description="Flushes recent DM discussions into permanent Markdown files and SQLite")
+@app_commands.user_install()
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    universe="Optional: Target universe to associate with flushed lore (default: Main Universe)",
+    start_date="Optional: Start date to flush (YYYY-MM-DD, defaults to today)"
+)
+@app_commands.autocomplete(universe=universe_autocomplete)
+async def flush_lore_slash(interaction: discord.Interaction, universe: str = None, start_date: str = None):
+    is_ephemeral = await should_be_ephemeral(interaction)
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=is_ephemeral)
+    except Exception:
+        pass
+
+    try:
+        active_uni = get_user_active_universe(interaction.user.id)
+        clean_uni = universe.strip() if universe and universe.lower() not in ("all", "global", "all universes") else (active_uni or "Main Universe")
+        target_date = start_date.strip() if start_date else datetime.datetime.now().strftime("%Y-%m-%d")
+
+        result = lore_manager.flush_history_to_lore_files(start_date=target_date, universe_name=clean_uni)
+        msg = (
+            f"## 💾 Archive Flush Complete!\n\n"
+            f"• **Flushed Dialogues:** **{result.get('count', 0)}** records\n"
+            f"• **Ground-Truth Facts Added:** **{result.get('inserted_overrides', 0)}** overrides\n"
+            f"• **Messages Indexed:** **{result.get('inserted_messages', 0)}** messages\n"
+            f"• **Dossier Markdown File:** `{result.get('dossier_path', 'lore/')}`\n\n"
+            f"✨ *All discussion from {target_date} is now permanently locked into your local database and Markdown files! You can safely restart the bot without losing any data.*"
+        )
+        await interaction.followup.send(msg, ephemeral=is_ephemeral)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to flush lore: {str(e)}", ephemeral=is_ephemeral)
+
 
 
 # 12. /ask Slash Command (Cross-Archive, Universe-Aware Semantic Search)

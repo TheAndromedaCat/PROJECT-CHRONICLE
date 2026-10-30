@@ -28,7 +28,7 @@ load_dotenv()
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DISCORD_USER_TOKEN = os.environ.get("DISCORD_USER_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 BASE_DIR = Path(__file__).resolve().parent
 
 def _ensure_executable(p: Path):
