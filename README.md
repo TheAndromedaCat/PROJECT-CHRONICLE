@@ -94,9 +94,11 @@ python lore_manager.py
   * `python lore_manager.py --flush`: Flushes today's DM discussions directly into `lore/<Universe>/` dossiers and SQLite.
   * `python lore_manager.py --sync`: Reads all markdown notes in `lore/` and syncs them into SQLite.
 
-### Discord Slash Commands for Lore Management:
+### Discord Slash Commands for Lore Management & Local LLM:
 * **`/addlore topic: [title] content: [details] universe: [Universe]`**: Record new lore directly from Discord without DCE.
 * **`/flushlore universe: [Universe]`**: Flush recent DM discussions into permanent Markdown files and SQLite.
+* **`/setlocal enabled: True/False [endpoint] [vision_endpoint]`**: Toggle 100% offline local inference via Llama.cpp / Qwen vs Google Gemini Cloud. Automatically falls back to cloud if local server is unreachable.
+
 
 
 

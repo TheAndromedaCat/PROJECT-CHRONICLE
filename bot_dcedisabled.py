@@ -140,13 +140,23 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_local_mode (
             user_id TEXT PRIMARY KEY,
             enabled INTEGER DEFAULT 0,
-            endpoint TEXT DEFAULT 'http://127.0.0.1:8080/v1',
-            vision_endpoint TEXT DEFAULT 'http://127.0.0.1:8081/v1',
+            endpoint TEXT DEFAULT 'http://127.0.0.1:11434/v1',
+            vision_endpoint TEXT DEFAULT 'http://127.0.0.1:11434/v1',
+            text_model TEXT DEFAULT '',
+            vision_model TEXT DEFAULT '',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
     # Auto-migrate older schema versions
+    try:
+        cursor.execute("ALTER TABLE user_local_mode ADD COLUMN text_model TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE user_local_mode ADD COLUMN vision_model TEXT DEFAULT ''")
+    except Exception:
+        pass
     try:
         cursor.execute("ALTER TABLE query_history ADD COLUMN response TEXT")
     except Exception:
@@ -1681,7 +1691,7 @@ class AntigravitySearchBot(commands.Bot):
 
                     final_answer = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.2)
+                        lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.2, user_id=user_id)
                     )
                     if not final_answer:
                         final_answer = "I searched through your chat archives, but couldn't find a direct record of that. Would you like me to look into a specific character, date, or scene?"
@@ -2574,7 +2584,7 @@ async def check_status(interaction: discord.Interaction):
             lines.append("")
 
         # 5. AI Model Routing & Quotas
-        model_pool_status = get_model_pool_status()
+        model_pool_status = get_model_pool_status(interaction.user.id)
         if model_pool_status:
             lines.append("### 🧠 AI Model Routing & Dynamic Fallbacks")
             for m_info in model_pool_status:
@@ -2714,7 +2724,7 @@ async def correct_lore(
             
             visual_analysis_text = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1)
+                lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id)
             )
             if visual_analysis_text:
                 final_lore_entry = f"{correction.strip()} [Visual Ref: {visual_analysis_text[:400]}...]"
@@ -2873,6 +2883,57 @@ async def flush_lore_slash(interaction: discord.Interaction, universe: str = Non
         await interaction.followup.send(f"❌ Failed to flush lore: {str(e)}", ephemeral=is_ephemeral)
 
 
+# 11d. /setlocal Slash Command (Toggle Local Llama.cpp Mode)
+@bot.tree.command(name="setlocal", description="Toggle local Llama.cpp / Qwen model inference vs Google Gemini Cloud")
+@app_commands.user_install()
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    enabled="True to route requests to local Llama.cpp server; False to use Google Gemini Cloud",
+    endpoint="Optional: Custom text LLM endpoint (default: http://127.0.0.1:8080/v1)",
+    vision_endpoint="Optional: Custom Vision LLM endpoint for images (default: http://127.0.0.1:8081/v1)"
+)
+async def set_local_slash(
+    interaction: discord.Interaction,
+    enabled: bool,
+    endpoint: str = None,
+    vision_endpoint: str = None
+):
+    is_ephemeral = await should_be_ephemeral(interaction)
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=is_ephemeral)
+    except Exception:
+        pass
+
+    try:
+        set_user_local_mode(
+            user_id=interaction.user.id,
+            enabled=enabled,
+            endpoint=endpoint.strip() if endpoint else None,
+            vision_endpoint=vision_endpoint.strip() if vision_endpoint else None
+        )
+        active_ep, active_vip = get_user_local_endpoints(interaction.user.id)
+        if enabled:
+            msg = (
+                f"## 🖥️ Local Model Inference Mode: **ENABLED**\n\n"
+                f"• **Text LLM Endpoint:** `{active_ep}` *(e.g. Qwen3.8-27B on port 8080)*\n"
+                f"• **Vision Model Endpoint:** `{active_vip}` *(e.g. Qwen2.5-VL-7B on port 8081)*\n"
+                f"• **Cloud Fallback:** Automatic (Falls back to Gemini Cloud if local server is unreachable)\n\n"
+                f"⚡ *All future searches, lore queries, and DMs will now be processed 100% locally on your machine with zero API quota usage!*"
+            )
+        else:
+            msg = (
+                f"## ☁️ Cloud Model Inference Mode: **ACTIVE**\n\n"
+                f"• **Provider:** Google Gemini Cloud API\n"
+                f"• **Active Model Hierarchy:** `gemini-3.5-flash-lite` (500 RPD) $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.8-flash`\n\n"
+                f"✨ *Requests are now routed through Google Gemini Cloud.*"
+            )
+        await interaction.followup.send(msg, ephemeral=is_ephemeral)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to update local mode setting: {str(e)}", ephemeral=is_ephemeral)
+
+
+
 
 # 12. /ask Slash Command (Cross-Archive, Universe-Aware Semantic Search)
 @bot.tree.command(name="ask", description="Deep forensic search across all past messages in your DMs, channels, or Universes")
@@ -2963,7 +3024,7 @@ async def ask_anywhere(
 
         final_answer = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1)
+            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id)
         )
         if not final_answer:
             final_answer = "No response generated."
@@ -3097,7 +3158,7 @@ async def character_command(
 
         final_answer = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1)
+            lambda: generate_gemini_content_sync(contents, system_instruction, temperature=0.1, user_id=interaction.user.id)
         )
         if not final_answer:
             final_answer = f"No visual analysis could be generated for {name}."
@@ -3173,7 +3234,7 @@ async def ask_message_context(interaction: discord.Interaction, message: discord
 
         final_answer = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: generate_gemini_content_sync(prompt, system_instruction, temperature=0.2)
+            lambda: generate_gemini_content_sync(prompt, system_instruction, temperature=0.2, user_id=interaction.user.id)
         )
         if not final_answer:
             final_answer = "No response generated."
